@@ -27,8 +27,8 @@ use r_efi::efi;
 use crate::{
     allocator::core_allocate_pool,
     decompress::CoreExtractor,
+    locks::tpl_lock,
     protocols::{PROTOCOL_DB, core_install_protocol_interface},
-    tpl_lock,
 };
 
 struct PrivateFvbData {

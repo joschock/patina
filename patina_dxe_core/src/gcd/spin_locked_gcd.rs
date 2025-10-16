@@ -25,8 +25,8 @@ use patina_internal_collections::{Error as SliceError, Rbt, SliceKey, node_size}
 use r_efi::efi;
 
 use crate::{
-    GCD, allocator::DEFAULT_ALLOCATION_STRATEGY, ensure, error, events::EVENT_DB, protocol_db,
-    protocol_db::INVALID_HANDLE, tpl_lock,
+    GCD, allocator::DEFAULT_ALLOCATION_STRATEGY, ensure, error, events::EVENT_DB, locks::tpl_lock, protocol_db,
+    protocol_db::INVALID_HANDLE,
 };
 use patina_internal_cpu::paging::create_cpu_paging;
 use patina_paging::{MemoryAttributes, PageTable, PtError, PtResult, page_allocator::PageAllocator};

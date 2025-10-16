@@ -13,14 +13,13 @@ use mu_rust_helpers::guid::guid_fmt;
 use patina::error::EfiError;
 use patina_internal_device_path::{is_device_path_end, remaining_device_path};
 use r_efi::efi;
-use tpl_lock::TplMutex;
 
 use crate::{
     allocator::core_allocate_pool,
     driver_services::{core_connect_controller, core_disconnect_controller},
     events::{EVENT_DB, signal_event},
+    locks,
     protocol_db::{DXE_CORE_HANDLE, SpinLockedProtocolDb},
-    tpl_lock,
 };
 
 pub static PROTOCOL_DB: SpinLockedProtocolDb = SpinLockedProtocolDb::new();
@@ -506,7 +505,7 @@ unsafe extern "C" fn install_multiple_protocol_interfaces(handle: *mut efi::Hand
     // TPL_NOTIFY prior to installing any of the interfaces, which has the effect of deferring any protocol notify
     // callbacks until after all protocols are installed. This code matches those semantics by using a TPL guard here
     // to ensure the logic of this function is conducted at TPL_NOTIFY.
-    let tpl_mutex = TplMutex::new(efi::TPL_NOTIFY, (), "atomic_protocol_install");
+    let tpl_mutex = locks::tpl_lock::TplMutex::new(efi::TPL_NOTIFY, (), "atomic_protocol_install");
     let _tpl_guard = tpl_mutex.lock();
 
     if handle.is_null() {

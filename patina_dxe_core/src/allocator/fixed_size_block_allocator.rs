@@ -13,7 +13,7 @@
 extern crate alloc;
 use super::{AllocationStrategy, DEFAULT_ALLOCATION_STRATEGY};
 
-use crate::{gcd::SpinLockedGcd, tpl_lock};
+use crate::{gcd::SpinLockedGcd, locks::tpl_lock};
 
 use alloc::vec::Vec;
 use core::{

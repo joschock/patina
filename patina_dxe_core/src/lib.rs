@@ -50,6 +50,7 @@ mod gcd;
 #[cfg(all(target_os = "uefi", target_arch = "aarch64"))]
 mod hw_interrupt_protocol;
 mod image;
+mod locks;
 mod memory_attributes_protocol;
 mod memory_manager;
 mod misc_boot_services;
@@ -58,7 +59,6 @@ mod protocol_db;
 mod protocols;
 mod runtime;
 mod systemtables;
-mod tpl_lock;
 
 #[cfg(test)]
 #[macro_use]
@@ -502,7 +502,7 @@ impl Core<Alloc> {
             runtime_services_ptr = st.runtime_services_mut() as *mut efi::RuntimeServices;
         }
 
-        tpl_lock::init_boot_services(boot_services_ptr);
+        locks::tpl_lock::init_boot_services(boot_services_ptr);
 
         memory_attributes_table::init_memory_attributes_table_support();
 

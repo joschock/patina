@@ -36,6 +36,7 @@ use crate::{
     dxe_services::{self, core_set_memory_space_attributes},
     events::EVENT_DB,
     filesystems::SimpleFile,
+    locks::tpl_lock,
     pecoff::{self, UefiPeInfo, relocation::RelocationBlock},
     protocol_db,
     protocols::{
@@ -43,7 +44,6 @@ use crate::{
     },
     runtime,
     systemtables::EfiSystemTable,
-    tpl_lock,
 };
 
 use efi::Guid;

@@ -14,7 +14,7 @@ use alloc::{alloc::Allocator, boxed::Box};
 use patina::{boot_services::BootServices, component::IntoComponent};
 use r_efi::efi;
 
-use crate::{allocator::EFI_RUNTIME_SERVICES_DATA_ALLOCATOR, tpl_lock};
+use crate::{allocator::EFI_RUNTIME_SERVICES_DATA_ALLOCATOR, locks::tpl_lock};
 
 pub static SYSTEM_TABLE: tpl_lock::TplMutex<Option<EfiSystemTable>> =
     tpl_lock::TplMutex::new(efi::TPL_NOTIFY, None, "StLock");

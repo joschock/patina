@@ -29,11 +29,11 @@ use mu_rust_helpers::function;
 use crate::{
     GCD, config_tables,
     gcd::{self, AllocateType as AllocationStrategy},
+    locks::tpl_lock,
     memory_attributes_table::MemoryAttributesTable,
     protocol_db::{self, INVALID_HANDLE},
     protocols::PROTOCOL_DB,
     systemtables::EfiSystemTable,
-    tpl_lock,
 };
 use patina::pi::{
     dxe_services::{self, GcdMemoryType, MemorySpaceDescriptor},

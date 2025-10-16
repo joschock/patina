@@ -37,9 +37,9 @@ use crate::{
     events::EVENT_DB,
     fv::{core_install_firmware_volume, device_path_bytes_for_fv_file},
     image::{core_load_image, core_start_image},
+    locks::tpl_lock::TplMutex,
     protocol_db::DXE_CORE_HANDLE,
     protocols::PROTOCOL_DB,
-    tpl_lock::TplMutex,
 };
 
 // Default Dependency expression per PI spec v1.2 Vol 2 section 10.9.

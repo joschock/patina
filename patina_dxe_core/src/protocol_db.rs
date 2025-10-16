@@ -19,7 +19,7 @@ use core::{cmp::Ordering, ffi::c_void, hash::Hasher};
 use patina::error::EfiError;
 use r_efi::efi;
 
-use crate::tpl_lock;
+use crate::locks::tpl_lock;
 
 //private UUID used to create the "well-known handles"
 const WELL_KNOWN_HANDLE_PROTOCOL_GUID: uuid::Uuid = uuid::Uuid::from_u128(0xfced7c96356e48cba9a9e089b2ddf49b);

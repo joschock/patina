@@ -20,7 +20,7 @@ use core::{cmp::Ordering, ffi::c_void, fmt};
 use patina::error::EfiError;
 use r_efi::efi;
 
-use crate::{runtime, tpl_lock};
+use crate::{locks::tpl_lock, runtime};
 
 /// Defines the supported UEFI event types
 #[repr(u32)]
