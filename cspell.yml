@@ -96,6 +96,7 @@ words:
   - irouter
   - iscsi
   - isenabler
+  - interruptible
   - itertools
   - jhpratt
   - joshlf
