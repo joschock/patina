@@ -27,7 +27,7 @@ use r_efi::efi;
 use crate::{
     allocator::core_allocate_pool,
     decompress::CoreExtractor,
-    locks::tpl_lock,
+    locks::tpl_mutex,
     protocols::{PROTOCOL_DB, core_install_protocol_interface},
 };
 
@@ -55,7 +55,7 @@ struct PrivateGlobalData {
 unsafe impl Sync for PrivateGlobalData {}
 unsafe impl Send for PrivateGlobalData {}
 
-static PRIVATE_FV_DATA: tpl_lock::TplMutex<PrivateGlobalData> = tpl_lock::TplMutex::new(
+static PRIVATE_FV_DATA: tpl_mutex::TplMutex<PrivateGlobalData> = tpl_mutex::TplMutex::new(
     efi::TPL_NOTIFY,
     PrivateGlobalData { fv_information: BTreeMap::new(), section_extractor: CoreExtractor::new() },
     "FvLock",

@@ -505,7 +505,7 @@ unsafe extern "C" fn install_multiple_protocol_interfaces(handle: *mut efi::Hand
     // TPL_NOTIFY prior to installing any of the interfaces, which has the effect of deferring any protocol notify
     // callbacks until after all protocols are installed. This code matches those semantics by using a TPL guard here
     // to ensure the logic of this function is conducted at TPL_NOTIFY.
-    let tpl_mutex = locks::tpl_lock::TplMutex::new(efi::TPL_NOTIFY, (), "atomic_protocol_install");
+    let tpl_mutex = locks::tpl_mutex::TplMutex::new(efi::TPL_NOTIFY, (), "atomic_protocol_install");
     let _tpl_guard = tpl_mutex.lock();
 
     if handle.is_null() {

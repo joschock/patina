@@ -502,7 +502,7 @@ impl Core<Alloc> {
             runtime_services_ptr = st.runtime_services_mut() as *mut efi::RuntimeServices;
         }
 
-        locks::tpl_lock::init_boot_services(boot_services_ptr);
+        locks::tpl_mutex::init_boot_services(boot_services_ptr);
 
         memory_attributes_table::init_memory_attributes_table_support();
 
