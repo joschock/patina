@@ -1,9 +1,4 @@
-use core::{
-    arch::asm,
-    num::NonZeroUsize,
-    ops::Shr,
-    sync::atomic::{AtomicBool, Ordering},
-};
+use core::{arch::asm, cell::UnsafeCell, num::NonZeroUsize, ops::Shr};
 
 use gdbstub::arch::{RegId, Registers};
 use patina::{read_sysreg, write_sysreg};
@@ -41,7 +36,31 @@ const OS_LOCK_STATUS_LOCKED: u64 = 0x2;
 
 const DAIF_DEBUG_MASK: u64 = 0x200;
 
-static POKE_TEST_MARKER: AtomicBool = AtomicBool::new(false);
+struct PokeTestCell(UnsafeCell<bool>);
+// SAFETY: PokeTestCell is used only in single-threaded context during debugger execution; interrupts are disabled when it is manipulated.
+unsafe impl Sync for PokeTestCell {}
+
+impl PokeTestCell {
+    // SAFETY: Caller must ensure that this is only used in single-threaded context.
+    unsafe fn set(&self) {
+        //SAFETY: see function requirements
+        unsafe { self.0.get().write_volatile(true) };
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+    }
+
+    // SAFETY: Caller must ensure that this is only used in single-threaded context.
+    unsafe fn swap(&self, value: bool) -> bool {
+        //SAFETY: see function requirements
+        unsafe {
+            let old = self.0.get().read_volatile();
+            self.0.get().write_volatile(value);
+            core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+            old
+        }
+    }
+}
+
+static POKE_TEST_MARKER: PokeTestCell = PokeTestCell(UnsafeCell::new(false));
 
 impl gdbstub::arch::Arch for Aarch64Arch {
     type Usize = u64;
@@ -259,7 +278,9 @@ impl DebuggerArch for Aarch64Arch {
 
     #[inline(never)]
     fn memory_poke_test(address: u64) -> Result<(), ()> {
-        POKE_TEST_MARKER.store(true, Ordering::SeqCst);
+        // SAFETY: This routine executes in a single-threaded context during exception handling, thus upholding the
+        // safety requirements of PokeTestCell.
+        unsafe { POKE_TEST_MARKER.set() };
 
         // Attempt to read the address to check if it is accessible.
         // This will raise a page fault if the address is not accessible.
@@ -271,11 +292,15 @@ impl DebuggerArch for Aarch64Arch {
         unsafe { asm!("ldr {}, [{}]", out(reg) _value, in(reg) address, options(nostack)) };
 
         // Check if the marker was cleared, indicating a page fault. Reset either way.
-        if POKE_TEST_MARKER.swap(false, Ordering::SeqCst) { Ok(()) } else { Err(()) }
+        // SAFETY: This routine executes in a single-threaded context during exception handling, thus upholding the
+        // safety requirements of PokeTestCell.
+        if unsafe { POKE_TEST_MARKER.swap(false) } { Ok(()) } else { Err(()) }
     }
 
     fn check_memory_poke_test(context: &mut ExceptionContext) -> bool {
-        let poke_test = POKE_TEST_MARKER.swap(false, Ordering::SeqCst);
+        // SAFETY: This routine executes in a single-threaded context during exception handling, thus upholding the
+        // safety requirements of PokeTestCell.
+        let poke_test = unsafe { POKE_TEST_MARKER.swap(false) };
         if poke_test {
             // We need to increment the instruction pointer to step past the load
             context.elr += 4;
