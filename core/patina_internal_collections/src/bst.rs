@@ -8,10 +8,7 @@
 //!
 #[cfg(feature = "alloc")]
 extern crate alloc;
-use core::{
-    cmp::Ordering,
-    sync::atomic::{self, AtomicPtr},
-};
+use core::{cell::Cell, cmp::Ordering};
 
 use crate::{
     Error, Result, SliceKey,
@@ -24,7 +21,7 @@ where
     D: SliceKey,
 {
     storage: Storage<'a, D>,
-    root: AtomicPtr<Node<D>>,
+    root: Cell<*mut Node<D>>,
 }
 
 impl<'a, D> Bst<'a, D>
@@ -37,12 +34,12 @@ where
     /// [with_capacity](Self::with_capacity) to create a tree with a given slice of memory immediately. Otherwise use
     /// [resize](Self::resize) to replace the memory later.
     pub const fn new() -> Self {
-        Bst { storage: Storage::new(), root: AtomicPtr::new(core::ptr::null_mut()) }
+        Bst { storage: Storage::new(), root: Cell::new(core::ptr::null_mut()) }
     }
 
     /// Creates a new binary tree with a given slice of memory.
     pub fn with_capacity(slice: &'a mut [u8]) -> Self {
-        Self { storage: Storage::with_capacity(slice), root: AtomicPtr::default() }
+        Self { storage: Storage::with_capacity(slice), root: Cell::default() }
     }
 
     /// Returns the number of elements in the tree.
@@ -68,11 +65,7 @@ where
 
     /// Returns the current root of the tree.
     fn root(&self) -> Option<&Node<D>> {
-        let root_ptr = self.root.load(atomic::Ordering::SeqCst);
-        if root_ptr.is_null() {
-            return None;
-        }
-        Some(unsafe { &*root_ptr })
+        unsafe { self.root.get().as_ref() }
     }
 
     /// Adds a value into the tree.
@@ -90,13 +83,12 @@ where
     pub fn add(&mut self, data: D) -> Result<usize> {
         let (idx, node) = self.storage.add(data)?;
 
-        if self.root.load(atomic::Ordering::SeqCst).is_null() {
-            self.root.store(node.as_mut_ptr(), atomic::Ordering::SeqCst);
-            return Ok(idx);
+        if self.root.get().is_null() {
+            self.root.set(node.as_mut_ptr());
+        } else {
+            let root = unsafe { self.root.get().as_mut().expect("root is not null") };
+            Self::add_node(root, node)?;
         }
-
-        let root = unsafe { &*self.root.load(atomic::Ordering::SeqCst) };
-        Self::add_node(root, node)?;
         Ok(idx)
     }
 
@@ -547,18 +539,18 @@ where
     }
 
     /// Removes a node in the tree.
-    fn remove_node_from_tree<'b>(root: &'b AtomicPtr<Node<D>>, to_delete: &'b Node<D>) {
+    fn remove_node_from_tree<'b>(root: &'b Cell<*mut Node<D>>, to_delete: &'b Node<D>) {
         if to_delete.left().is_none() || to_delete.right().is_none() {
             let moved_up = Self::remove_node_with_zero_or_one_child(to_delete);
             if to_delete.parent().is_none() {
-                root.store(moved_up.as_mut_ptr(), atomic::Ordering::SeqCst);
+                root.set(moved_up.as_mut_ptr());
                 moved_up.set_parent(None);
             }
         } else {
             let successor = Node::successor(to_delete).expect("to_delete has both children");
             Node::swap(to_delete, successor);
             if successor.parent().is_none() {
-                root.store(successor.as_mut_ptr(), atomic::Ordering::SeqCst);
+                root.set(successor.as_mut_ptr());
                 successor.set_parent(None);
             }
             let _ = Self::remove_node_with_zero_or_one_child(to_delete);
@@ -614,13 +606,12 @@ where
 {
     /// Replaces the memory of the tree with a new slice, copying the data from the old slice to the new slice.
     pub fn resize(&mut self, slice: &'a mut [u8]) {
-        let root = (!self.root.load(atomic::Ordering::SeqCst).is_null())
-            .then(|| self.storage.idx(self.root.load(atomic::Ordering::SeqCst)));
+        let root = { if self.root.get().is_null() { None } else { Some(self.storage.idx(self.root.get())) } };
 
         self.storage.resize(slice);
 
         if let Some(idx) = root {
-            self.root.store(self.storage.get_mut(idx).expect("Pointer Exists."), atomic::Ordering::SeqCst);
+            self.root.set(self.storage.get_mut(idx).expect("Pointer Exists."));
         }
     }
 
