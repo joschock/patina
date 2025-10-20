@@ -6,10 +6,7 @@
 //!
 //! SPDX-License-Identifier: Apache-2.0
 //!
-use core::{
-    ffi::c_void,
-    sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
-};
+use core::ffi::c_void;
 
 use r_efi::efi;
 
@@ -20,13 +17,17 @@ use patina_internal_cpu::interrupts;
 use crate::{
     event_db::{SpinLockedEventDb, TimerDelay},
     gcd,
+    locks::{interrupt_mutex::InterruptMutex, interruptible_mutex::InterruptibleMutex},
     protocols::PROTOCOL_DB,
 };
 
 pub static EVENT_DB: SpinLockedEventDb = SpinLockedEventDb::new();
 
-static CURRENT_TPL: AtomicUsize = AtomicUsize::new(efi::TPL_APPLICATION);
-static SYSTEM_TIME: AtomicU64 = AtomicU64::new(0);
+// SAFETY: CURRENT_TPL is only locked in small critical sections which do not manipulate interrupts.
+static CURRENT_TPL: InterruptMutex<efi::Tpl> = unsafe { InterruptMutex::new(efi::TPL_APPLICATION, "CurrentTplLock") };
+
+// SAFETY: SYSTEM_TIME is only locked in small critical sections which do not manipulate interrupts.
+static SYSTEM_TIME: InterruptMutex<u64> = unsafe { InterruptMutex::new(0, "SystemTimeLock") };
 
 extern "efiapi" fn create_event(
     event_type: u32,
@@ -125,7 +126,7 @@ extern "efiapi" fn wait_for_event(
         return efi::Status::INVALID_PARAMETER;
     }
 
-    if CURRENT_TPL.load(Ordering::SeqCst) != efi::TPL_APPLICATION {
+    if *CURRENT_TPL.lock() != efi::TPL_APPLICATION {
         return efi::Status::UNSUPPORTED;
     }
 
@@ -199,8 +200,8 @@ pub extern "efiapi" fn set_timer(event: efi::Event, timer_type: efi::TimerDelay,
 
     let (trigger_time, period) = match timer_type {
         TimerDelay::Cancel => (None, None),
-        TimerDelay::Relative => (Some(SYSTEM_TIME.load(Ordering::SeqCst) + trigger_time), None),
-        TimerDelay::Periodic => (Some(SYSTEM_TIME.load(Ordering::SeqCst) + trigger_time), Some(trigger_time)),
+        TimerDelay::Relative => (Some(*SYSTEM_TIME.lock() + trigger_time), None),
+        TimerDelay::Periodic => (Some(*SYSTEM_TIME.lock() + trigger_time), Some(trigger_time)),
     };
 
     match EVENT_DB.set_timer(event, timer_type, trigger_time, period) {
@@ -212,12 +213,14 @@ pub extern "efiapi" fn set_timer(event: efi::Event, timer_type: efi::TimerDelay,
 pub extern "efiapi" fn raise_tpl(new_tpl: efi::Tpl) -> efi::Tpl {
     assert!(new_tpl <= efi::TPL_HIGH_LEVEL, "Invalid attempt to raise TPL above TPL_HIGH_LEVEL");
 
-    let prev_tpl = CURRENT_TPL.fetch_max(new_tpl, Ordering::SeqCst);
-
+    let mut tpl_guard = CURRENT_TPL.lock();
+    let prev_tpl = *tpl_guard;
     assert!(
         new_tpl >= prev_tpl,
         "Invalid attempt to raise TPL to lower value. New TPL: {new_tpl:#x?}, Prev TPL: {prev_tpl:#x?}"
     );
+    *tpl_guard = new_tpl;
+    drop(tpl_guard);
 
     if (new_tpl == efi::TPL_HIGH_LEVEL) && (prev_tpl < efi::TPL_HIGH_LEVEL) {
         interrupts::disable_interrupts();
@@ -226,50 +229,46 @@ pub extern "efiapi" fn raise_tpl(new_tpl: efi::Tpl) -> efi::Tpl {
 }
 
 pub extern "efiapi" fn restore_tpl(new_tpl: efi::Tpl) {
-    let prev_tpl = CURRENT_TPL.fetch_min(new_tpl, Ordering::SeqCst);
-
+    let mut tpl_guard = CURRENT_TPL.lock();
+    let prev_tpl = *tpl_guard;
     assert!(
         new_tpl <= prev_tpl,
         "Invalid attempt to restore TPL to higher value. New TPL: {new_tpl:#x?}, Prev TPL: {prev_tpl:#x?}"
     );
+    *tpl_guard = new_tpl;
+    drop(tpl_guard);
 
     if new_tpl < prev_tpl {
         // loop over any pending event notifications. Note: more notifications can be queued in the course of servicing
         // the current set of notifies; this will continue looping as long as there are any pending notifications, even
         // if they were queued after the loop started.
         loop {
-            // Care must be taken to deal with reentrant "restore_tpl" cases. For example, the consume_next_event_notify
-            // call requires taking the lock on EVENT_DB to retrieve the next notification. The release of that lock will
-            // call restore_tpl. To avoid infinite recursion, this logic uses EVENT_NOTIFIES_IN_PROGRESS as a flag to
-            // avoid reentrancy in the specific case that the lock is being taken for the purpose of acquiring event
-            // notifies.
-            static EVENT_NOTIFIES_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
-            let event =
-                match EVENT_NOTIFIES_IN_PROGRESS.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed) {
-                    Ok(_) => {
-                        let result = EVENT_DB.consume_next_event_notify(new_tpl);
-                        EVENT_NOTIFIES_IN_PROGRESS.store(false, Ordering::Release);
-                        result
-                    }
-                    _ => break, /* reentrant restore_tpl case */
+            // restore_tpl() may be re-entrant, but only the outermost call should process event notifies. Use a mutex here
+            // to skip notification processing on nested calls.
+            static EVENT_NOTIFIES_IN_PROGRESS: InterruptibleMutex<()> =
+                InterruptibleMutex::new((), "RestoreTplEventNotifiesInProgressLock");
+            let event = if let Some(_guard) = EVENT_NOTIFIES_IN_PROGRESS.try_lock() {
+                let Some(event) = EVENT_DB.consume_next_event_notify(new_tpl) else {
+                    break; /* no pending events */
                 };
-
-            let Some(event) = event else {
-                break; /* no pending events */
+                event
+            } else {
+                break; // reentrant restore_tpl.
             };
+
             if event.notify_tpl < efi::TPL_HIGH_LEVEL {
                 interrupts::enable_interrupts();
             } else {
                 interrupts::disable_interrupts();
             }
-            CURRENT_TPL.store(event.notify_tpl, Ordering::SeqCst);
+            *CURRENT_TPL.lock() = event.notify_tpl;
             let notify_context = event.notify_context.unwrap_or(core::ptr::null_mut());
 
             if EVENT_DB.get_event_type(event.event).unwrap().is_notify_signal() {
                 let _ = EVENT_DB.clear_signal(event.event);
             }
 
-            //Caution: this is calling function pointer supplied by code outside DXE Rust.
+            //Caution: this is calling function pointer supplied by code outside Patina.
             //The notify_function is not "unsafe" per the signature, even though it's
             //supplied by code outside the core module. If it were marked 'unsafe'
             //then other Rust modules executing under DXE Rust would need to mark all event
@@ -281,18 +280,23 @@ pub extern "efiapi" fn restore_tpl(new_tpl: efi::Tpl) {
         }
     }
 
+    *CURRENT_TPL.lock() = new_tpl;
+
     if new_tpl < efi::TPL_HIGH_LEVEL {
         interrupts::enable_interrupts();
     }
-    CURRENT_TPL.store(new_tpl, Ordering::SeqCst);
 }
 
 extern "efiapi" fn timer_tick(time: u64) {
-    let old_tpl = raise_tpl(efi::TPL_HIGH_LEVEL);
-    SYSTEM_TIME.fetch_add(time, Ordering::SeqCst);
-    let current_time = SYSTEM_TIME.load(Ordering::SeqCst);
+    let mut system_time = SYSTEM_TIME.lock();
+    *system_time += time;
+    let current_time = *system_time;
+    // Don't hold the SYSTEM_TIME lock while calling into EVENT_DB. This is mostly a matter of good hygiene to limit
+    // the lifetime of the SYSTEM_TIME critical section. The expectation is that the timer tick is running in an
+    // interrupt handler that is already at high TPL with interrupts disabled, so holding the lock wouldn't matter; but
+    // the EVENT_DB.timer_tick() call does not _need_ the SYSTEM_TIME locked, so explicitely release it here.
+    drop(system_time);
     EVENT_DB.timer_tick(current_time);
-    restore_tpl(old_tpl); //implicitly dispatches timer notifies if any.
 }
 
 extern "efiapi" fn timer_available_callback(event: efi::Event, _context: *mut c_void) {
@@ -309,19 +313,14 @@ extern "efiapi" fn timer_available_callback(event: efi::Event, _context: *mut c_
     }
 }
 
-// indicates that eventing subsystem is fully initialized.
-static EVENT_DB_INITIALIZED: AtomicBool = AtomicBool::new(false);
-
 /// This callback is invoked whenever the GCD changes, and will signal the required UEFI event group.
 pub fn gcd_map_change(map_change_type: gcd::MapChangeType) {
-    if EVENT_DB_INITIALIZED.load(Ordering::SeqCst) {
-        match map_change_type {
-            gcd::MapChangeType::AddMemorySpace
-            | gcd::MapChangeType::AllocateMemorySpace
-            | gcd::MapChangeType::FreeMemorySpace
-            | gcd::MapChangeType::RemoveMemorySpace => EVENT_DB.signal_group(efi::EVENT_GROUP_MEMORY_MAP_CHANGE),
-            gcd::MapChangeType::SetMemoryAttributes | gcd::MapChangeType::SetMemoryCapabilities => (),
-        }
+    match map_change_type {
+        gcd::MapChangeType::AddMemorySpace
+        | gcd::MapChangeType::AllocateMemorySpace
+        | gcd::MapChangeType::FreeMemorySpace
+        | gcd::MapChangeType::RemoveMemorySpace => EVENT_DB.signal_group(efi::EVENT_GROUP_MEMORY_MAP_CHANGE),
+        gcd::MapChangeType::SetMemoryAttributes | gcd::MapChangeType::SetMemoryCapabilities => (),
     }
 }
 
@@ -344,9 +343,6 @@ pub fn init_events_support(bs: &mut efi::BootServices) {
     PROTOCOL_DB
         .register_protocol_notify(timer::PROTOCOL_GUID, event)
         .expect("Failed to register protocol notify on timer arch callback.");
-
-    //Indicate eventing is initialized
-    EVENT_DB_INITIALIZED.store(true, Ordering::SeqCst);
 }
 
 #[cfg(test)]
@@ -354,7 +350,10 @@ pub fn init_events_support(bs: &mut efi::BootServices) {
 mod tests {
     use super::*;
     use crate::test_support;
-    use std::{ptr, sync::atomic::Ordering};
+    use core::{
+        ptr,
+        sync::atomic::{AtomicBool, Ordering},
+    };
 
     fn with_locked_state<F: Fn() + std::panic::RefUnwindSafe>(f: F) {
         test_support::with_global_lock(|| {
@@ -557,7 +556,7 @@ mod tests {
     #[test]
     fn test_wait_for_event_signaled() {
         with_locked_state(|| {
-            CURRENT_TPL.store(efi::TPL_APPLICATION, Ordering::SeqCst);
+            *CURRENT_TPL.lock() = efi::TPL_APPLICATION;
             let mut event: efi::Event = ptr::null_mut();
             create_event(efi::EVT_NOTIFY_WAIT, efi::TPL_NOTIFY, Some(test_notify), ptr::null_mut(), &mut event);
             signal_event(event);
@@ -593,10 +592,10 @@ mod tests {
             assert_eq!(result, efi::Status::SUCCESS);
 
             let initial_time = 1000u64;
-            SYSTEM_TIME.store(initial_time, Ordering::SeqCst);
+            *SYSTEM_TIME.lock() = initial_time;
 
             let wait_time = 500u64;
-            let result = set_timer(event, 1 /* TimerDelay::Relative */, wait_time);
+            let result = set_timer(event, TimerDelay::Relative as u32, wait_time);
             assert_eq!(result, efi::Status::SUCCESS);
         })
     }
@@ -606,7 +605,7 @@ mod tests {
         with_locked_state(|| {
             // Test with invalid event
             let invalid_event: efi::Event = ptr::null_mut();
-            let result = set_timer(invalid_event, 1 /* TimerDelay::Relative */, 100);
+            let result = set_timer(invalid_event, TimerDelay::Relative as u32, 100);
 
             // Should return an error status
             assert_ne!(result, efi::Status::SUCCESS);
@@ -693,7 +692,7 @@ mod tests {
     fn test_event_notification() {
         with_locked_state(|| {
             // Ensure we start from a low TPL so that signal_event's raise/restore will dispatch notifies
-            CURRENT_TPL.store(efi::TPL_APPLICATION, Ordering::SeqCst);
+            *CURRENT_TPL.lock() = efi::TPL_APPLICATION;
             NOTIFY_CALLED.store(false, Ordering::SeqCst);
 
             let mut event: efi::Event = ptr::null_mut();
@@ -722,12 +721,23 @@ mod tests {
     #[test]
     fn test_event_notification_with_tpl_change_fires_lower_events() {
         with_locked_state(|| {
+            // NOTE: This test case is an example of unsafe bad code: artificially lowering the TPL below the current
+            // TPL is unsafe because it violates the expectation that tasks executing at a lower level may not interrupt
+            // tasks at a higher level. Lowering the TPL below the current TPL what it was at the time the event was
+            // signled can lead to priority inversion and other hard-to-debug issues. It is always a bug if it occurs.
+            //
+            // This test case is used to validate the present behavior of the core in this pathological case, which
+            // generally matches the EDK2 C core.
+            //
             NOTIFY_CALLED.store(false, Ordering::SeqCst);
 
-            // special callback that does TPL manipulation.
+            // Special callback that does invalid TPL manipulation. THIS SHOULD NOT BE EMULATED IN ANY USER CODE.
             extern "efiapi" fn test_tpl_switching_notify(_event: efi::Event, _context: *mut c_void) {
                 let old_tpl = raise_tpl(efi::TPL_HIGH_LEVEL);
                 restore_tpl(efi::TPL_APPLICATION);
+
+                // BUG ZONE: Event callbacks at any level can be signalled here. All expectations of mutual exclusion
+                // based on TPL are violated.
 
                 if old_tpl > efi::TPL_APPLICATION {
                     raise_tpl(old_tpl);
@@ -773,7 +783,7 @@ mod tests {
             // notification should have been called (current TPL was briefly lowered to notification TPL).
             assert!(NOTIFY_CALLED.load(Ordering::SeqCst));
 
-            assert_eq!(CURRENT_TPL.load(Ordering::SeqCst), efi::TPL_CALLBACK);
+            assert_eq!(*CURRENT_TPL.lock(), efi::TPL_CALLBACK);
 
             // Clean up
             let _ = close_event(event);
@@ -808,12 +818,12 @@ mod tests {
             let events: [efi::Event; 1] = [ptr::null_mut()];
 
             // Set TPL to something other than APPLICATION
-            CURRENT_TPL.store(efi::TPL_NOTIFY, Ordering::SeqCst);
+            *CURRENT_TPL.lock() = efi::TPL_NOTIFY;
 
             let status = wait_for_event(1, events.as_ptr() as *mut efi::Event, &mut index as *mut usize);
             assert_eq!(status, efi::Status::UNSUPPORTED);
 
-            CURRENT_TPL.store(efi::TPL_APPLICATION, Ordering::SeqCst);
+            *CURRENT_TPL.lock() = efi::TPL_APPLICATION;
         });
     }
 
@@ -876,28 +886,28 @@ mod tests {
     fn test_raise_tpl_sequence() {
         with_locked_state(|| {
             // Store original TPL to restore later
-            let original_tpl = CURRENT_TPL.load(Ordering::SeqCst);
+            let original_tpl = *CURRENT_TPL.lock();
 
             // Set known starting TPL
-            CURRENT_TPL.store(efi::TPL_APPLICATION, Ordering::SeqCst);
+            *CURRENT_TPL.lock() = efi::TPL_APPLICATION;
 
             // Test raising from APPLICATION to CALLBACK
             let prev_tpl = raise_tpl(efi::TPL_CALLBACK);
             assert_eq!(prev_tpl, efi::TPL_APPLICATION);
-            assert_eq!(CURRENT_TPL.load(Ordering::SeqCst), efi::TPL_CALLBACK);
+            assert_eq!(*CURRENT_TPL.lock(), efi::TPL_CALLBACK);
 
             // Test raising from CALLBACK to NOTIFY
             let prev_tpl = raise_tpl(efi::TPL_NOTIFY);
             assert_eq!(prev_tpl, efi::TPL_CALLBACK);
-            assert_eq!(CURRENT_TPL.load(Ordering::SeqCst), efi::TPL_NOTIFY);
+            assert_eq!(*CURRENT_TPL.lock(), efi::TPL_NOTIFY);
 
             // Test raising to HIGH_LEVEL (should disable interrupts)
             let prev_tpl = raise_tpl(efi::TPL_HIGH_LEVEL);
             assert_eq!(prev_tpl, efi::TPL_NOTIFY);
-            assert_eq!(CURRENT_TPL.load(Ordering::SeqCst), efi::TPL_HIGH_LEVEL);
+            assert_eq!(*CURRENT_TPL.lock(), efi::TPL_HIGH_LEVEL);
 
             // Restore original TPL
-            CURRENT_TPL.store(original_tpl, Ordering::SeqCst);
+            *CURRENT_TPL.lock() = original_tpl;
             // Re-enable interrupts if we left them disabled
             interrupts::enable_interrupts();
         });
@@ -917,16 +927,16 @@ mod tests {
             assert!(would_panic, "TPL values greater than HIGH_LEVEL should not be allowed");
 
             // Additionally, we can test that valid TPL values work correctly
-            let original_tpl = CURRENT_TPL.load(Ordering::SeqCst);
-            CURRENT_TPL.store(efi::TPL_APPLICATION, Ordering::SeqCst);
+            let original_tpl = *CURRENT_TPL.lock();
+            *CURRENT_TPL.lock() = efi::TPL_APPLICATION;
 
             // Test with valid value - should not panic
             let prev_tpl = raise_tpl(efi::TPL_HIGH_LEVEL);
             assert_eq!(prev_tpl, efi::TPL_APPLICATION);
-            assert_eq!(CURRENT_TPL.load(Ordering::SeqCst), efi::TPL_HIGH_LEVEL);
+            assert_eq!(*CURRENT_TPL.lock(), efi::TPL_HIGH_LEVEL);
 
             // Restore original TPL
-            CURRENT_TPL.store(original_tpl, Ordering::SeqCst);
+            *CURRENT_TPL.lock() = original_tpl;
         });
     }
 
@@ -934,7 +944,7 @@ mod tests {
     fn test_raise_tpl_to_lower() {
         with_locked_state(|| {
             // Store original TPL to restore later
-            let original_tpl = CURRENT_TPL.load(Ordering::SeqCst);
+            let original_tpl = *CURRENT_TPL.lock();
 
             // Instead of triggering a panic, we'll test the condition
             // that would cause a panic
@@ -942,7 +952,7 @@ mod tests {
             let lower_tpl = efi::TPL_CALLBACK; // Lower than NOTIFY
 
             // Set starting TPL to NOTIFY
-            CURRENT_TPL.store(current_tpl, Ordering::SeqCst);
+            *CURRENT_TPL.lock() = current_tpl;
 
             // This would trigger the panic in raise_tpl:
             // raise_tpl(lower_tpl)
@@ -958,10 +968,10 @@ mod tests {
             let higher_tpl = efi::TPL_HIGH_LEVEL; // Higher than NOTIFY
             let prev_tpl = raise_tpl(higher_tpl);
             assert_eq!(prev_tpl, current_tpl);
-            assert_eq!(CURRENT_TPL.load(Ordering::SeqCst), higher_tpl);
+            assert_eq!(*CURRENT_TPL.lock(), higher_tpl);
 
             // Restore original TPL
-            CURRENT_TPL.store(original_tpl, Ordering::SeqCst);
+            *CURRENT_TPL.lock() = original_tpl;
         });
     }
 
@@ -969,26 +979,26 @@ mod tests {
     fn test_restore_tpl_sequence() {
         with_locked_state(|| {
             // Store original TPL to restore later
-            let original_tpl = CURRENT_TPL.load(Ordering::SeqCst);
+            let original_tpl = *CURRENT_TPL.lock();
 
             // Set known starting TPL
-            CURRENT_TPL.store(efi::TPL_HIGH_LEVEL, Ordering::SeqCst);
+            *CURRENT_TPL.lock() = efi::TPL_HIGH_LEVEL;
             interrupts::disable_interrupts();
 
             // Test restoring from HIGH_LEVEL to NOTIFY
             restore_tpl(efi::TPL_NOTIFY);
-            assert_eq!(CURRENT_TPL.load(Ordering::SeqCst), efi::TPL_NOTIFY);
+            assert_eq!(*CURRENT_TPL.lock(), efi::TPL_NOTIFY);
 
             // Test restoring from NOTIFY to CALLBACK
             restore_tpl(efi::TPL_CALLBACK);
-            assert_eq!(CURRENT_TPL.load(Ordering::SeqCst), efi::TPL_CALLBACK);
+            assert_eq!(*CURRENT_TPL.lock(), efi::TPL_CALLBACK);
 
             // Test restoring from CALLBACK to APPLICATION
             restore_tpl(efi::TPL_APPLICATION);
-            assert_eq!(CURRENT_TPL.load(Ordering::SeqCst), efi::TPL_APPLICATION);
+            assert_eq!(*CURRENT_TPL.lock(), efi::TPL_APPLICATION);
 
             // Restore original TPL
-            CURRENT_TPL.store(original_tpl, Ordering::SeqCst);
+            *CURRENT_TPL.lock() = original_tpl;
         });
     }
 
@@ -996,14 +1006,14 @@ mod tests {
     fn test_restore_tpl_to_higher() {
         with_locked_state(|| {
             // Store original TPL to restore later
-            let original_tpl = CURRENT_TPL.load(Ordering::SeqCst);
+            let original_tpl = *CURRENT_TPL.lock();
 
             // Set starting TPL to a known value
             let current_tpl = efi::TPL_NOTIFY;
             let higher_tpl = efi::TPL_HIGH_LEVEL; // Higher than NOTIFY
 
             // Set starting TPL
-            CURRENT_TPL.store(current_tpl, Ordering::SeqCst);
+            *CURRENT_TPL.lock() = current_tpl;
 
             // This would trigger the panic in restore_tpl:
             // restore_tpl(higher_tpl)
@@ -1014,14 +1024,14 @@ mod tests {
 
             // Test valid case - should not panic
             restore_tpl(current_tpl); // Same level, should be fine
-            assert_eq!(CURRENT_TPL.load(Ordering::SeqCst), current_tpl);
+            assert_eq!(*CURRENT_TPL.lock(), current_tpl);
 
             let lower_tpl = efi::TPL_CALLBACK; // Lower than NOTIFY
             restore_tpl(lower_tpl);
-            assert_eq!(CURRENT_TPL.load(Ordering::SeqCst), lower_tpl);
+            assert_eq!(*CURRENT_TPL.lock(), lower_tpl);
 
             // Restore original TPL
-            CURRENT_TPL.store(original_tpl, Ordering::SeqCst);
+            *CURRENT_TPL.lock() = original_tpl;
         });
     }
 
@@ -1029,9 +1039,6 @@ mod tests {
     #[test]
     fn test_gcd_map_change() {
         with_locked_state(|| {
-            // Set initialized flag
-            EVENT_DB_INITIALIZED.store(true, Ordering::SeqCst);
-
             // Test each map change type
             gcd_map_change(gcd::MapChangeType::AddMemorySpace);
             gcd_map_change(gcd::MapChangeType::AllocateMemorySpace);
@@ -1039,18 +1046,12 @@ mod tests {
             gcd_map_change(gcd::MapChangeType::RemoveMemorySpace);
             gcd_map_change(gcd::MapChangeType::SetMemoryAttributes);
             gcd_map_change(gcd::MapChangeType::SetMemoryCapabilities);
-
-            // Reset initialized flag
-            EVENT_DB_INITIALIZED.store(false, Ordering::SeqCst);
         });
     }
 
     #[test]
     fn test_gcd_map_change_not_initialized() {
         with_locked_state(|| {
-            // Ensure initialized flag is false
-            EVENT_DB_INITIALIZED.store(false, Ordering::SeqCst);
-
             // Call should have no effect and not panic
             gcd_map_change(gcd::MapChangeType::AddMemorySpace);
         });
@@ -1059,14 +1060,14 @@ mod tests {
     #[test]
     fn test_timer_tick() {
         with_locked_state(|| {
-            let original_time = SYSTEM_TIME.load(Ordering::SeqCst);
+            let original_time = *SYSTEM_TIME.lock();
 
             let test_time = 1000;
             timer_tick(test_time);
 
-            assert_eq!(SYSTEM_TIME.load(Ordering::SeqCst), original_time + test_time);
+            assert_eq!(*SYSTEM_TIME.lock(), original_time + test_time);
 
-            SYSTEM_TIME.store(original_time, Ordering::SeqCst);
+            *SYSTEM_TIME.lock() = original_time;
         });
     }
 
@@ -1402,12 +1403,6 @@ mod tests {
             assert!(boot_services.set_timer as usize != dummy_set_timer as usize);
             assert!(boot_services.raise_tpl as usize != dummy_raise_tpl as usize);
             assert!(boot_services.restore_tpl as usize != dummy_restore_tpl as usize);
-
-            // Verify initialization flag is set
-            assert!(EVENT_DB_INITIALIZED.load(Ordering::SeqCst));
-
-            // Reset the flag for other tests
-            EVENT_DB_INITIALIZED.store(false, Ordering::SeqCst);
         });
     }
 }
