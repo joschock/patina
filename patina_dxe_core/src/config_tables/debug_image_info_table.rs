@@ -10,16 +10,11 @@ extern crate alloc;
 use alloc::{boxed::Box, vec, vec::Vec};
 use patina::base::UEFI_PAGE_SIZE;
 
-use core::{
-    ffi::c_void,
-    fmt::Debug,
-    mem::size_of,
-    ptr,
-    sync::atomic::{AtomicPtr, AtomicU64, Ordering},
-};
+use core::{ffi::c_void, fmt::Debug, mem::size_of, ptr};
 
 use crate::{
-    GCD, config_tables::core_install_configuration_table, gcd::AllocateType, protocol_db, systemtables::EfiSystemTable,
+    GCD, config_tables::core_install_configuration_table, gcd::AllocateType,
+    locks::interruptible_mutex::InterruptibleMutex, protocol_db, systemtables::EfiSystemTable,
 };
 
 use patina::pi::dxe_services::GcdMemoryType;
@@ -103,11 +98,17 @@ struct DebugImageInfoTableMetadata<'a> {
     slice: Box<[EfiDebugImageInfo]>,
 }
 
-static METADATA_TABLE: AtomicPtr<DebugImageInfoTableMetadata> = AtomicPtr::new(core::ptr::null_mut());
+struct DebugImageTablePtr(*mut DebugImageInfoTableMetadata<'static>);
+// SAFETY: This is safe because we ensure that the pointer is only accessed under a lock.
+unsafe impl Send for DebugImageTablePtr {}
+
+static METADATA_TABLE: InterruptibleMutex<DebugImageTablePtr> =
+    InterruptibleMutex::new(DebugImageTablePtr(core::ptr::null_mut()), "MetadataTableLock");
 
 const ALIGNMENT_SHIFT_4MB: usize = 22;
 
-static DBG_SYSTEM_TABLE_POINTER_ADDRESS: AtomicU64 = AtomicU64::new(0);
+static DBG_SYSTEM_TABLE_POINTER_ADDRESS: InterruptibleMutex<u64> =
+    InterruptibleMutex::new(0, "DbgSystemTablePointerAddressLock");
 
 /// Initializes the EFI_DEBUG_IMAGE_INFO_TABLE_GUID configuration table in the UEFI system table with an empty table.
 pub(crate) fn initialize_debug_image_info_table(system_table: &mut EfiSystemTable) {
@@ -132,7 +133,7 @@ pub(crate) fn initialize_debug_image_info_table(system_table: &mut EfiSystemTabl
         table: unsafe { &mut *table_ptr.cast::<DebugImageInfoTableHeader>() },
         slice: initial_table,
     });
-    METADATA_TABLE.store(Box::into_raw(table), Ordering::SeqCst);
+    *METADATA_TABLE.lock() = DebugImageTablePtr(Box::into_raw(table));
 
     // Now create the EFI_SYSTEM_TABLE_POINTER structure
     let system_table_pointer = system_table.system_table() as *const _ as u64;
@@ -170,10 +171,10 @@ pub(crate) fn initialize_debug_image_info_table(system_table: &mut EfiSystemTabl
     }
 
     // Set the system table address for the debugger.
-    DBG_SYSTEM_TABLE_POINTER_ADDRESS.store(address as u64, Ordering::Relaxed);
+    *DBG_SYSTEM_TABLE_POINTER_ADDRESS.lock() = address as u64;
 
     patina_debugger::add_monitor_command("system_table_ptr", "Prints the system table pointer", |_, out| {
-        let address = DBG_SYSTEM_TABLE_POINTER_ADDRESS.load(Ordering::Relaxed);
+        let address = *DBG_SYSTEM_TABLE_POINTER_ADDRESS.lock();
         let _ = write!(out, "{address:x}");
     });
 }
@@ -188,7 +189,7 @@ pub(crate) fn core_new_debug_image_info_entry(
     // of that on a load of an atomic pointer causes improper code generation and LLVM to crash. So, this check is a workaround
     // to check if the pointer is in the first page of memory, which is a valid check for null in this case, as we mark
     // that entire page as invalid. LLVM issue: https://github.com/llvm/llvm-project/issues/137152.
-    let metadata_table = METADATA_TABLE.load(Ordering::SeqCst);
+    let metadata_table = METADATA_TABLE.lock().0;
     if metadata_table < UEFI_PAGE_SIZE as *mut DebugImageInfoTableMetadata {
         log::error!("EFI_DEBUG_IMAGE_INFO_TABLE_GUID table not initialized");
         return;
@@ -250,7 +251,7 @@ pub(crate) fn core_remove_debug_image_info_entry(image_handle: efi::Handle) {
     // of that on a load of an atomic pointer causes improper code generation and LLVM to crash. So, this check is a workaround
     // to check if the pointer is in the first page of memory, which is a valid check for null in this case, as we mark
     // that entire page as invalid. LLVM issue: https://github.com/llvm/llvm-project/issues/137152.
-    let metadata_table = METADATA_TABLE.load(Ordering::SeqCst);
+    let metadata_table = METADATA_TABLE.lock().0;
     if metadata_table < UEFI_PAGE_SIZE as *mut DebugImageInfoTableMetadata {
         log::error!("EFI_DEBUG_IMAGE_INFO_TABLE_GUID table not initialized");
         return;
