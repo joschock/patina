@@ -11,7 +11,7 @@
 //! SPDX-License-Identifier: Apache-2.0
 //!
 
-use core::{ffi::c_void, sync::atomic::AtomicBool};
+use core::ffi::c_void;
 
 use crate::pi::list_entry;
 use r_efi::efi;
@@ -49,9 +49,9 @@ pub struct Protocol {
     /// Virtual address of the memory map.
     pub memory_map_virtual: *mut efi::MemoryDescriptor,
     /// Whether virtual addressing mode is active.
-    pub virtual_mode: AtomicBool,
+    pub virtual_mode: bool,
     /// Whether system is at runtime.
-    pub at_runtime: AtomicBool,
+    pub at_runtime: bool,
 }
 
 /// Related definition for runtime architectural protocol as the entry type

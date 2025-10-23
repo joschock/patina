@@ -9,10 +9,10 @@
 
 use core::{ffi::c_void, ptr};
 
+use crate::locks::interruptible_mutex::InterruptibleMutex;
 use alloc::collections::LinkedList;
 use patina::error::EfiError;
 use r_efi::efi;
-use spin::Mutex;
 
 use crate::{events::EVENT_DB, pecoff::relocation::RelocationBlock, protocols::PROTOCOL_DB};
 use patina::pi::{list_entry, protocols::runtime};
@@ -26,7 +26,7 @@ struct RuntimeData {
 unsafe impl Sync for RuntimeData {}
 unsafe impl Send for RuntimeData {}
 
-static RUNTIME_DATA: Mutex<RuntimeData> = Mutex::new(RuntimeData::new());
+static RUNTIME_DATA: InterruptibleMutex<RuntimeData> = InterruptibleMutex::new(RuntimeData::new(), "RuntimeDataLock");
 
 impl RuntimeData {
     const fn new() -> Self {
@@ -82,7 +82,8 @@ pub fn init_runtime_support(_rt: &mut efi::RuntimeServices) {
 pub fn finalize_runtime_support() {
     let data = RUNTIME_DATA.lock();
     if !data.runtime_arch_ptr.is_null() {
-        unsafe { (*data.runtime_arch_ptr).at_runtime.store(true, core::sync::atomic::Ordering::Relaxed) };
+        let runtime_arch_ptr = data.runtime_arch_ptr;
+        unsafe { core::ptr::write_volatile(&mut (*runtime_arch_ptr).at_runtime, true) };
     }
 }
 
@@ -165,7 +166,6 @@ pub fn remove_runtime_image(image_handle: efi::Handle) -> Result<(), EfiError> {
 mod tests {
     use super::*;
     use crate::test_support::with_global_lock;
-    use core::{ptr, sync::atomic::AtomicBool};
 
     fn setup_protocol_and_data() -> RuntimeData {
         let protocol = runtime::Protocol {
@@ -176,8 +176,8 @@ mod tests {
             memory_map_size: 0,
             memory_map_physical: ptr::null_mut(),
             memory_map_virtual: ptr::null_mut(),
-            virtual_mode: AtomicBool::new(false),
-            at_runtime: AtomicBool::new(false),
+            virtual_mode: false,
+            at_runtime: false,
         };
         let mut data = RuntimeData::new();
         data.runtime_arch_ptr = Box::leak(Box::new(protocol));
