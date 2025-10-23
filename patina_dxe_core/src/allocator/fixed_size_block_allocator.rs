@@ -767,12 +767,18 @@ unsafe impl Allocator for SpinLockedFixedSizeBlockAllocator {
                 const _: () = assert!(ALIGNMENT.is_multiple_of(align_of::<AllocatorListNode>()));
                 const _: () = assert!(ALIGNMENT.is_multiple_of(UEFI_PAGE_SIZE) && ALIGNMENT > 0);
 
-                // As a matter of policy, allocate at least `MIN_EXPANSION` memory and ensure the size is
-                // aligned to `ALIGNMENT`.
-                let mut allocation_size = max(additional_mem_required, MIN_EXPANSION);
-                let required_alignment = self.lock().page_allocation_granularity;
+                // As a matter of policy, allocate the required memory plus at least `MIN_EXPANSION` memory. This
+                // ensures that the pool will have at least MIN_EXPANSION free after satisfiying the current request.
+                // This avoids thrashing the allocator with an additional expansion if addtional_mem_required happens to
+                // be near to MIN_EXPANSION. Otherwise, if additional_mem_required is close to MIN_EXPANSION in size,
+                // then an expansion may only leave a small amount of free memory in the pool, which may not be
+                // sufficient to satisfy future allocations, causing another expansion soon after. Allocating MIN_EXPANSION
+                // bytes in addition to the required memory ensures that there is always a reasonable amount of free
+                // memory left in the pool after expansion.
+                let mut allocation_size = additional_mem_required + MIN_EXPANSION;
 
-                // Ensure that the requested number of pages is a multiple of the granularity
+                // In addition, ensure that the expansion is aligned to the page allocation granularity.
+                let required_alignment = self.lock().page_allocation_granularity;
                 let required_pages =
                     align_up(uefi_size_to_pages!(allocation_size), uefi_size_to_pages!(required_alignment)).map_err(
                         |_| {
@@ -1572,21 +1578,20 @@ mod tests {
             assert_eq!(stats.claimed_pages, 0);
 
             //reserve some space and check the stats.
-            fsb.reserve_memory_pages(uefi_size_to_pages!(MIN_EXPANSION * 2)).unwrap();
+            const RESERVED_SIZE: usize = MIN_EXPANSION * 4;
+            fsb.reserve_memory_pages(uefi_size_to_pages!(RESERVED_SIZE)).unwrap();
 
             let stats = fsb.stats();
             assert_eq!(stats.pool_allocation_calls, 0);
             assert_eq!(stats.pool_free_calls, 0);
             assert_eq!(stats.page_allocation_calls, 0);
             assert_eq!(stats.page_free_calls, 0);
-            assert_eq!(stats.reserved_size, MIN_EXPANSION * 2);
+            assert_eq!(stats.reserved_size, RESERVED_SIZE);
             assert_eq!(stats.reserved_used, 0);
-            assert_eq!(stats.claimed_pages, uefi_size_to_pages!(MIN_EXPANSION * 2));
+            assert_eq!(stats.claimed_pages, uefi_size_to_pages!(RESERVED_SIZE));
 
             //test alloc/deallocate and stats within the bucket
-            let ptr = unsafe {
-                fsb.alloc(Layout::from_size_align(MIN_EXPANSION - size_of::<AllocatorListNode>(), 0x8).unwrap())
-            };
+            let ptr = unsafe { fsb.alloc(Layout::from_size_align(MIN_EXPANSION, 0x8).unwrap()) };
 
             let stats = fsb.stats();
             //an additional allocation call will be made as the first one will fail due to a lack of memory
@@ -1594,32 +1599,38 @@ mod tests {
             assert_eq!(stats.pool_free_calls, 0);
             assert_eq!(stats.page_allocation_calls, 0);
             assert_eq!(stats.page_free_calls, 0);
-            assert_eq!(stats.reserved_size, MIN_EXPANSION * 2);
-            assert_eq!(stats.reserved_used, MIN_EXPANSION + uefi_pages_to_size!(1));
-            assert_eq!(stats.claimed_pages, uefi_size_to_pages!(MIN_EXPANSION * 2));
+            assert_eq!(stats.reserved_size, RESERVED_SIZE);
+            assert_eq!(stats.reserved_used, (MIN_EXPANSION * 2) + uefi_pages_to_size!(1));
+            assert_eq!(stats.claimed_pages, uefi_size_to_pages!(RESERVED_SIZE));
 
             unsafe {
                 fsb.dealloc(ptr, Layout::from_size_align(0x100, 0x8).unwrap());
             }
 
             let stats = fsb.stats();
-            //an additional allocation call will be made as the first one will fail due to a lack of memory
             assert_eq!(stats.pool_allocation_calls, 2);
             assert_eq!(stats.pool_free_calls, 1);
             assert_eq!(stats.page_allocation_calls, 0);
             assert_eq!(stats.page_free_calls, 0);
-            assert_eq!(stats.reserved_size, MIN_EXPANSION * 2);
-            assert_eq!(stats.reserved_used, MIN_EXPANSION + uefi_pages_to_size!(1));
-            assert_eq!(stats.claimed_pages, uefi_size_to_pages!(MIN_EXPANSION * 2));
+            assert_eq!(stats.reserved_size, RESERVED_SIZE);
+            assert_eq!(stats.reserved_used, (MIN_EXPANSION * 2) + uefi_pages_to_size!(1));
+            assert_eq!(stats.claimed_pages, uefi_size_to_pages!(RESERVED_SIZE));
 
             //test alloc/deallocate and stats blowing the bucket
             let ptr = unsafe { fsb.alloc(Layout::from_size_align(MIN_EXPANSION * 3, 0x8).unwrap()) };
 
-            //after this allocate, the basic memory map of the FSB should look like:
-            //1MB range as a result of previous pool allocation expand - available for pool allocation.
-            //    Claims first 1MB of 2MB reserved region.
-            //1MB free but owned by the allocator (not pool) as a result of 2MB reservation.
-            //3MB+1 page range as a result of 3MB allocation + 1 page to hold allocator node.
+            // After this allocate, the expected memory map from the GCD perspective is:
+            //
+            // 1. MIN_EXPANSION * 2 + uefi_pages_to_size!(1) is used by the pool allocator. Of this, MIN_EXPANSION is
+            //    claimed by the first allocation, 0x0100 is claimed by the second allocation.
+            //
+            //    The remainder of RESERVED_SIZE (except for the allocator list head node) is free for pool allocations,
+            //    but is assigned as allocated to the pool allocator in the GCD.
+            //
+            // 2. MIN_EXPANSION * 3 + MIN_EXPANSION page range as a result of 3MB allocation + 1 page to hold allocator
+            //    node. This does not come from the reserved region and is allocated to the pool allocator in the GCD as
+            //    a separate region. This memory is now free within the pool allocator, but remains allocated to the
+            //    pool allocator in the GCD.
 
             let stats = fsb.stats();
             //an additional allocation call will be made as the first one will fail due to a lack of memory
@@ -1627,105 +1638,138 @@ mod tests {
             assert_eq!(stats.pool_free_calls, 1);
             assert_eq!(stats.page_allocation_calls, 0);
             assert_eq!(stats.page_free_calls, 0);
-            assert_eq!(stats.reserved_size, MIN_EXPANSION * 2);
-            assert_eq!(stats.reserved_used, MIN_EXPANSION + uefi_pages_to_size!(1));
-            assert_eq!(stats.claimed_pages, uefi_size_to_pages!(MIN_EXPANSION * 5) + 1);
+            assert_eq!(stats.reserved_size, RESERVED_SIZE);
+            assert_eq!(stats.reserved_used, (MIN_EXPANSION * 2) + uefi_pages_to_size!(1));
+            assert_eq!(stats.claimed_pages, uefi_size_to_pages!(RESERVED_SIZE + MIN_EXPANSION * 4) + 1);
 
             unsafe {
                 fsb.dealloc(ptr, Layout::from_size_align(MIN_EXPANSION * 3, 0x8).unwrap());
             }
 
-            //after this free, the basic memory map of the FSB should look like:
-            //1MB range as a result of previous pool allocation expand - available for pool allocation.
-            //    Claims first 1MB of 2MB reserved region.
-            //1MB free but owned by the allocator (not pool) as a result of 2MB reservation.
-            //3MB+1 page range as a result of 3MB allocation + 1 page to hold allocator node - available for pool allocation.
+            // After this free, the expected memory map from the GCD perspective is:
+            //
+            // 1. MIN_EXPANSION * 2 + uefi_pages_to_size!(1) is used by the pool allocator. Of this, MIN_EXPANSION is
+            //    claimed by the first allocation, 0x0100 is claimed by the second allocation.
+            //
+            //    The remainder of RESERVED_SIZE (except for the allocator list head node) is free for pool allocations,
+            //    but is assigned as allocated to the pool allocator in the GCD.
+            //
+            // 2. MIN_EXPANSION * 3 + MIN_EXPANSION page range as a result of 3MB allocation + 1 page to hold allocator
+            //    node. This does not come from the reserved region and is allocated to the pool allocator in the GCD as
+            //    a separate region. This memory is now free within the pool allocator, but remains allocated to the
+            //    pool allocator in the GCD.
 
             let stats = fsb.stats();
             assert_eq!(stats.pool_allocation_calls, 4);
             assert_eq!(stats.pool_free_calls, 2);
             assert_eq!(stats.page_allocation_calls, 0);
             assert_eq!(stats.page_free_calls, 0);
-            assert_eq!(stats.reserved_size, MIN_EXPANSION * 2);
-            assert_eq!(stats.reserved_used, MIN_EXPANSION + uefi_pages_to_size!(1));
-            assert_eq!(stats.claimed_pages, uefi_size_to_pages!(MIN_EXPANSION * 5) + 1);
+            assert_eq!(stats.reserved_size, RESERVED_SIZE);
+            assert_eq!(stats.reserved_used, (MIN_EXPANSION * 2) + uefi_pages_to_size!(1));
+            assert_eq!(stats.claimed_pages, uefi_size_to_pages!(RESERVED_SIZE + MIN_EXPANSION * 4) + 1);
 
             // test that a small page allocation fits in the 1MB free reserved region.
             let ptr = fsb.allocate_pages(DEFAULT_ALLOCATION_STRATEGY, 0x4, UEFI_PAGE_SIZE).unwrap().as_ptr();
 
-            //after this allocate_pages, the basic memory map of the FSB should look like:
-            //1MB range as a result of previous pool allocation expand - available for pool allocation.
-            //    Claims first 1MB of 2MB reserved region.
-            //16K allocated.
-            //1MB-16k free but owned by the allocator (not pool) as a result of 2MB reservation.
-            //3MB+1 page range as a result of 3MB allocation + 1 page to hold allocator node - available for pool allocation.
+            // After this allocation, the expected memory map from the GCD perspective is:
+            //
+            // 1. MIN_EXPANSION * 2 + uefi_pages_to_size!(5) is used by the pool allocator in the reserved region. Of
+            //    this, MIN_EXPANSION is claimed by the first allocation, 0x0100 is claimed by the second allocation,
+            //    and 0x0040 is claimed by the page allocation.
+            //
+            //    The remainder of RESERVED_SIZE (except for the allocator list head node) is free for pool allocations,
+            //    but is assigned as allocated to the pool allocator in the GCD.
+            //
+            // 2. MIN_EXPANSION * 3 + MIN_EXPANSION page range as a result of 3MB allocation + 1 page to hold allocator
+            //    node. This does not come from the reserved region and is allocated to the pool allocator in the GCD as
+            //    a separate region. This memory is now free within the pool allocator, but remains allocated to the
+            //    pool allocator in the GCD.
 
             let stats = fsb.stats();
             assert_eq!(stats.pool_allocation_calls, 4);
             assert_eq!(stats.pool_free_calls, 2);
             assert_eq!(stats.page_allocation_calls, 1);
             assert_eq!(stats.page_free_calls, 0);
-            assert_eq!(stats.reserved_size, MIN_EXPANSION * 2);
-            assert_eq!(stats.reserved_used, MIN_EXPANSION + uefi_pages_to_size!(5));
-            assert_eq!(stats.claimed_pages, uefi_size_to_pages!(MIN_EXPANSION * 5) + 1);
+            assert_eq!(stats.reserved_size, RESERVED_SIZE);
+            assert_eq!(stats.reserved_used, (MIN_EXPANSION * 2) + uefi_pages_to_size!(5));
+            assert_eq!(stats.claimed_pages, uefi_size_to_pages!(RESERVED_SIZE + MIN_EXPANSION * 4) + 1);
 
             unsafe {
                 fsb.free_pages(ptr as *mut u8 as usize, 0x4).unwrap();
             }
 
-            //after this free, the basic memory map of the FSB should look like:
-            //1MB range as a result of previous pool allocation expand - available for pool allocation.
-            //    Claims first 1MB of 2MB reserved region.
-            //1MB free but owned by the allocator (not pool) as a result of 2MB reservation.
-            //3MB+1 page range as a result of 3MB allocation + 1 page to hold allocator node - available for pool allocation.
+            // After this free, the expected memory map from the GCD perspective is:
+            //
+            // 1. MIN_EXPANSION * 2 + uefi_pages_to_size!(5) is used by the pool allocator in the reserved region. Of
+            //    this, MIN_EXPANSION is claimed by the first allocation, 0x0100 is claimed by the second allocation.
+            //
+            //    The remainder of RESERVED_SIZE (except for the allocator list head node) is free for pool allocations,
+            //    but is assigned as allocated to the pool allocator in the GCD.
+            //
+            // 2. MIN_EXPANSION * 3 + MIN_EXPANSION page range as a result of 3MB allocation + 1 page to hold allocator
+            //    node. This does not come from the reserved region and is allocated to the pool allocator in the GCD as
+            //    a separate region. This memory is now free within the pool allocator, but remains allocated to the
+            //    pool allocator in the GCD.
 
             let stats = fsb.stats();
             assert_eq!(stats.pool_allocation_calls, 4);
             assert_eq!(stats.pool_free_calls, 2);
             assert_eq!(stats.page_allocation_calls, 1);
             assert_eq!(stats.page_free_calls, 1);
-            assert_eq!(stats.reserved_size, MIN_EXPANSION * 2);
-            assert_eq!(stats.reserved_used, MIN_EXPANSION + uefi_pages_to_size!(1));
-            assert_eq!(stats.claimed_pages, uefi_size_to_pages!(MIN_EXPANSION * 5) + 1);
+            assert_eq!(stats.reserved_size, RESERVED_SIZE);
+            assert_eq!(stats.reserved_used, (MIN_EXPANSION * 2) + uefi_pages_to_size!(1));
+            assert_eq!(stats.claimed_pages, uefi_size_to_pages!(RESERVED_SIZE + MIN_EXPANSION * 4) + 1);
 
             //test that a lage page allocation results in more claimed pages.
             let ptr = fsb.allocate_pages(DEFAULT_ALLOCATION_STRATEGY, 0x104, UEFI_PAGE_SIZE).unwrap().as_ptr();
 
-            //after this allocate_pages, the basic memory map of the FSB should look like:
-            //1MB range as a result of previous pool allocation expand - available for pool allocation.
-            //    Claims first 1MB of 2MB reserved region.
-            //1MB free but owned by the allocator (not pool) as a result of 2MB reservation.
-            //3MB+1 page range as a result of 3MB allocation + 1 page to hold allocator node - available for pool allocation.
-            //104 pages (1MB+16K) page as a result of allocation.
+            // After this allocation, the expected memory map from the GCD perspective is:
+            //
+            // 1. MIN_EXPANSION * 2 + uefi_pages_to_size!(5) is used by the pool allocator in the reserved region. Of
+            //    this, MIN_EXPANSION is claimed by the first allocation, 0x0100 is claimed by the second allocation.
+            //
+            //    The remainder of RESERVED_SIZE (except for the allocator list head node) is free for pool allocations,
+            //    but is assigned as allocated to the pool allocator in the GCD.
+            //
+            // 2. MIN_EXPANSION * 3 + MIN_EXPANSION page range as a result of 3MB allocation + 1 page to hold allocator
+            //    node. This does not come from the reserved region and is allocated to the pool allocator in the GCD as
+            //    a separate region. Except for 0x104 pages, this memory is now free within the pool allocator, but
+            //    remains allocated to the pool allocator in the GCD.
 
             let stats = fsb.stats();
             assert_eq!(stats.pool_allocation_calls, 4);
             assert_eq!(stats.pool_free_calls, 2);
             assert_eq!(stats.page_allocation_calls, 2);
             assert_eq!(stats.page_free_calls, 1);
-            assert_eq!(stats.reserved_size, MIN_EXPANSION * 2);
-            assert_eq!(stats.reserved_used, MIN_EXPANSION + uefi_pages_to_size!(1));
-            assert_eq!(stats.claimed_pages, uefi_size_to_pages!(MIN_EXPANSION * 5) + 1 + 0x104);
+            assert_eq!(stats.reserved_size, RESERVED_SIZE);
+            assert_eq!(stats.reserved_used, (MIN_EXPANSION * 2) + uefi_pages_to_size!(1 + 0x104));
+            assert_eq!(stats.claimed_pages, uefi_size_to_pages!(RESERVED_SIZE + MIN_EXPANSION * 4) + 1);
 
             // test that a small page allocation fits in the 1MB free reserved region.
             let ptr1 = fsb.allocate_pages(DEFAULT_ALLOCATION_STRATEGY, 0x4, UEFI_PAGE_SIZE).unwrap().as_ptr();
 
-            //after this allocate_pages, the basic memory map of the FSB should look like:
-            //1MB range as a result of previous pool allocation expand - available for pool allocation.
-            //    Claims first 1MB of 2MB reserved region.
-            //16K allocated.
-            //1MB-16k free but owned by the allocator (not pool) as a result of 2MB reservation.
-            //3MB+1 page range as a result of 3MB allocation + 1 page to hold allocator node - available for pool allocation.
-            //104 pages (1MB+16K) page as a result of allocation.
+            // After this allocation, the expected memory map from the GCD perspective is:
+            //
+            // 1. MIN_EXPANSION * 2 + uefi_pages_to_size!(5) is used by the pool allocator in the reserved region. Of
+            //    this, MIN_EXPANSION is claimed by the first allocation, 0x0100 is claimed by the second allocation.
+            //
+            //    The remainder of RESERVED_SIZE (except for the allocator list head node) is free for pool allocations,
+            //    but is assigned as allocated to the pool allocator in the GCD.
+            //
+            // 2. MIN_EXPANSION * 3 + MIN_EXPANSION page range as a result of 3MB allocation + 1 page to hold allocator
+            //    node. This does not come from the reserved region and is allocated to the pool allocator in the GCD as
+            //    a separate region. Except for 0x104 pages, this memory is now free within the pool allocator, but
+            //    remains allocated to the pool allocator in the GCD.
 
             let stats = fsb.stats();
             assert_eq!(stats.pool_allocation_calls, 4);
             assert_eq!(stats.pool_free_calls, 2);
             assert_eq!(stats.page_allocation_calls, 3);
             assert_eq!(stats.page_free_calls, 1);
-            assert_eq!(stats.reserved_size, MIN_EXPANSION * 2);
-            assert_eq!(stats.reserved_used, MIN_EXPANSION + uefi_pages_to_size!(5));
-            assert_eq!(stats.claimed_pages, uefi_size_to_pages!(MIN_EXPANSION * 5) + 1 + 0x104);
+            assert_eq!(stats.reserved_size, RESERVED_SIZE);
+            assert_eq!(stats.reserved_size, RESERVED_SIZE);
+            assert_eq!(stats.reserved_used, (MIN_EXPANSION * 2) + uefi_pages_to_size!(1 + 0x104 + 0x4));
+            assert_eq!(stats.claimed_pages, uefi_size_to_pages!(RESERVED_SIZE + MIN_EXPANSION * 4) + 1);
 
             unsafe {
                 fsb.free_pages(ptr1 as *mut u8 as usize, 0x4).unwrap();
@@ -1734,20 +1778,27 @@ mod tests {
                 fsb.free_pages(ptr as *mut u8 as usize, 0x104).unwrap();
             }
 
-            //after this free, the basic memory map of the FSB should look like:
-            //1MB range as a result of previous pool allocation expand - available for pool allocation.
-            //    Claims first 1MB of 2MB reserved region.
-            //1MB free but owned by the allocator (not pool) as a result of 2MB reservation.
-            //3MB+1 page range as a result of 3MB allocation + 1 page to hold allocator node - available for pool allocation.
+            // After these frees, the expected memory map from the GCD perspective is:
+            //
+            // 1. MIN_EXPANSION * 2 + uefi_pages_to_size!(5) is used by the pool allocator in the reserved region. Of
+            //    this, MIN_EXPANSION is claimed by the first allocation, 0x0100 is claimed by the second allocation.
+            //
+            //    The remainder of RESERVED_SIZE (except for the allocator list head node) is free for pool allocations,
+            //    but is assigned as allocated to the pool allocator in the GCD.
+            //
+            // 2. MIN_EXPANSION * 3 + MIN_EXPANSION page range as a result of 3MB allocation + 1 page to hold allocator
+            //    node. This does not come from the reserved region and is allocated to the pool allocator in the GCD as
+            //    a separate region. This memory is now free within the pool allocator, but
+            //    remains allocated to the pool allocator in the GCD.
 
             let stats = fsb.stats();
             assert_eq!(stats.pool_allocation_calls, 4);
             assert_eq!(stats.pool_free_calls, 2);
             assert_eq!(stats.page_allocation_calls, 3);
             assert_eq!(stats.page_free_calls, 3);
-            assert_eq!(stats.reserved_size, MIN_EXPANSION * 2);
-            assert_eq!(stats.reserved_used, MIN_EXPANSION + uefi_pages_to_size!(1));
-            assert_eq!(stats.claimed_pages, uefi_size_to_pages!(MIN_EXPANSION * 5) + 1);
+            assert_eq!(stats.reserved_size, RESERVED_SIZE);
+            assert_eq!(stats.reserved_used, (MIN_EXPANSION * 2) + uefi_pages_to_size!(1));
+            assert_eq!(stats.claimed_pages, uefi_size_to_pages!(RESERVED_SIZE + MIN_EXPANSION * 4) + 1);
         });
     }
 

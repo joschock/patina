@@ -540,6 +540,11 @@ impl EventDb {
     }
 }
 
+enum PendingSignals {
+    Event(efi::Event),
+    Group(efi::Guid),
+}
+
 /// Spin-Locked event database instance.
 ///
 /// This is the main access point for interaction with the event database.
@@ -548,6 +553,7 @@ impl EventDb {
 /// is properly guarded against race conditions.
 pub struct SpinLockedEventDb {
     inner: tpl_mutex::TplMutex<EventDb>,
+    pending_signals: tpl_mutex::TplMutex<Vec<PendingSignals>>,
 }
 
 impl Default for SpinLockedEventDb {
@@ -559,11 +565,34 @@ impl Default for SpinLockedEventDb {
 impl SpinLockedEventDb {
     /// Creates a new instance of EventDb.
     pub const fn new() -> Self {
-        SpinLockedEventDb { inner: tpl_mutex::TplMutex::new(efi::TPL_HIGH_LEVEL, EventDb::new(), "EventLock") }
+        SpinLockedEventDb {
+            inner: tpl_mutex::TplMutex::new(efi::TPL_HIGH_LEVEL, EventDb::new(), "EventLock"),
+            pending_signals: tpl_mutex::TplMutex::new(efi::TPL_HIGH_LEVEL, Vec::new(), "PendingSignalsLock"),
+        }
     }
 
     fn lock(&self) -> tpl_mutex::TplGuard<'_, EventDb> {
         self.inner.lock()
+    }
+
+    fn try_lock(&self) -> Option<tpl_mutex::TplGuard<'_, EventDb>> {
+        self.inner.try_lock()
+    }
+
+    fn drain_pending_signals(&self) {
+        let mut pending_signals = self.pending_signals.lock();
+        for pending_signal in pending_signals.drain(..) {
+            match pending_signal {
+                PendingSignals::Event(event) => {
+                    if let Err(e) = self.lock().signal_event(event) {
+                        log::error!("Error {e:?} signaling event {event:?}.");
+                    }
+                }
+                PendingSignals::Group(group) => {
+                    self.lock().signal_group(group);
+                }
+            }
+        }
     }
 
     /// Creates a new event in the event database
@@ -584,7 +613,9 @@ impl SpinLockedEventDb {
         notify_context: Option<*mut c_void>,
         event_group: Option<efi::Guid>,
     ) -> Result<efi::Event, EfiError> {
-        self.lock().create_event(event_type, notify_tpl, notify_function, notify_context, event_group)
+        let result = self.lock().create_event(event_type, notify_tpl, notify_function, notify_context, event_group);
+        self.drain_pending_signals();
+        result
     }
 
     /// Closes (deletes) an event from the event database
@@ -596,7 +627,9 @@ impl SpinLockedEventDb {
     ///
     /// Returns r_efi:efi::Status::INVALID_PARAMETER if incorrect parameters are given.
     pub fn close_event(&self, event: efi::Event) -> Result<(), EfiError> {
-        self.lock().close_event(event)
+        let result = self.lock().close_event(event);
+        self.drain_pending_signals();
+        result
     }
 
     /// Marks an event as signaled, and queues it for dispatch if it is of type NotifySignalEvent
@@ -608,7 +641,14 @@ impl SpinLockedEventDb {
     ///
     /// Returns r_efi:efi::Status::INVALID_PARAMETER if incorrect parameters are given.
     pub fn signal_event(&self, event: efi::Event) -> Result<(), EfiError> {
-        self.lock().signal_event(event)
+        if let Some(mut event_db) = self.try_lock() {
+            event_db.signal_event(event)
+        } else {
+            //defer the signal to be processed later.
+            let mut pending_signals = self.pending_signals.lock();
+            pending_signals.push(PendingSignals::Event(event));
+            Ok(())
+        }
     }
 
     /// Signals an event group
@@ -617,7 +657,13 @@ impl SpinLockedEventDb {
     /// equivalent would need to be accomplished by creating a dummy event that is a member of the group and signalling
     /// that event.
     pub fn signal_group(&self, group: efi::Guid) {
-        self.lock().signal_group(group)
+        if let Some(mut event_db) = self.try_lock() {
+            event_db.signal_group(group);
+        } else {
+            //defer the signal to be processed later.
+            let mut pending_signals = self.pending_signals.lock();
+            pending_signals.push(PendingSignals::Group(group));
+        }
     }
 
     /// Returns the event type for the given event
@@ -626,13 +672,17 @@ impl SpinLockedEventDb {
     ///
     /// Returns r_efi:efi::Status::INVALID_PARAMETER if incorrect event is given.
     pub fn get_event_type(&self, event: efi::Event) -> Result<EventType, EfiError> {
-        self.lock().get_event_type(event)
+        let result = self.lock().get_event_type(event);
+        self.drain_pending_signals();
+        result
     }
 
     /// Indicates whether the given event is in the signaled state
     #[allow(dead_code)]
     pub fn is_signaled(&self, event: efi::Event) -> bool {
-        self.lock().is_signaled(event)
+        let result = self.lock().is_signaled(event);
+        self.drain_pending_signals();
+        result
     }
 
     /// Clears the signaled state for the given event.
@@ -642,7 +692,9 @@ impl SpinLockedEventDb {
     /// Returns r_efi:efi::Status::INVALID_PARAMETER if incorrect parameters are given.
     #[allow(dead_code)]
     pub fn clear_signal(&self, event: efi::Event) -> Result<(), EfiError> {
-        self.lock().clear_signal(event)
+        let result = self.lock().clear_signal(event);
+        self.drain_pending_signals();
+        result
     }
 
     /// Atomically reads and clears the signaled state.
@@ -656,6 +708,8 @@ impl SpinLockedEventDb {
         if signaled {
             event_db.clear_signal(event)?;
         }
+        drop(event_db);
+        self.drain_pending_signals();
         Ok(signaled)
     }
 
@@ -667,7 +721,9 @@ impl SpinLockedEventDb {
     ///
     /// Returns r_efi:efi::Status::INVALID_PARAMETER if incorrect parameters are given.
     pub fn queue_event_notify(&self, event: efi::Event) -> Result<(), EfiError> {
-        self.lock().queue_event_notify(event)
+        let result = self.lock().queue_event_notify(event);
+        self.drain_pending_signals();
+        result
     }
 
     /// Returns the notification data associated with the event.
@@ -677,7 +733,9 @@ impl SpinLockedEventDb {
     /// Returns r_efi:efi::Status::INVALID_PARAMETER if incorrect parameters are given.
     #[allow(dead_code)]
     pub fn get_notification_data(&self, event: efi::Event) -> Result<EventNotification, EfiError> {
-        self.lock().get_notification_data(event)
+        let result = self.lock().get_notification_data(event);
+        self.drain_pending_signals();
+        result
     }
 
     /// Sets a timer on the specified event
@@ -695,7 +753,9 @@ impl SpinLockedEventDb {
         trigger_time: Option<u64>,
         period: Option<u64>,
     ) -> Result<(), EfiError> {
-        self.lock().set_timer(event, timer_type, trigger_time, period)
+        let result = self.lock().set_timer(event, timer_type, trigger_time, period);
+        self.drain_pending_signals();
+        result
     }
 
     /// called to advance the system time and process any timer events that fire
@@ -711,6 +771,7 @@ impl SpinLockedEventDb {
     /// [`consume_next_event_notify`](SpinLockedEventDb::consume_next_event_notify).
     pub fn timer_tick(&self, current_time: u64) {
         self.lock().timer_tick(current_time);
+        self.drain_pending_signals();
     }
 
     /// Returns the next pending event notification (if any) that should be dispatched at or above the given TPL level.
@@ -721,12 +782,16 @@ impl SpinLockedEventDb {
     /// causes the timer to expire.
     ///
     pub fn consume_next_event_notify(&self, tpl_level: efi::Tpl) -> Option<EventNotification> {
-        self.lock().consume_next_event_notify(tpl_level)
+        let result = self.lock().consume_next_event_notify(tpl_level);
+        self.drain_pending_signals();
+        result
     }
 
     /// Indicates whether a given event is valid.
     pub fn is_valid(&self, event: efi::Event) -> bool {
-        self.lock().is_valid(event)
+        let result = self.lock().is_valid(event);
+        self.drain_pending_signals();
+        result
     }
 }
 
