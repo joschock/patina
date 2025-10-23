@@ -9,32 +9,31 @@
 extern crate alloc;
 use alloc::vec::Vec;
 
-use core::{
-    ffi::c_void,
-    fmt::Debug,
-    mem::size_of,
-    slice,
-    sync::atomic::{AtomicBool, AtomicPtr, Ordering},
-};
+use core::{ffi::c_void, fmt::Debug, mem::size_of, slice};
 
 use crate::{
     allocator::{MemoryDescriptorSlice, core_allocate_pool, core_free_pool, get_memory_map_descriptors},
     config_tables::core_install_configuration_table,
     events::EVENT_DB,
+    locks::interruptible_mutex::InterruptibleMutex,
     systemtables,
 };
 use r_efi::efi;
-
-// We cache the MAT here because we need to free it in whenever we get a new runtime code/data allocation
-static MEMORY_ATTRIBUTES_TABLE: AtomicPtr<c_void> = AtomicPtr::new(core::ptr::null_mut());
 
 // create a wrapper struct so that we can create an install method on it. That way, we can have the install function
 // be a no-op until after ReadyToBoot
 pub struct MemoryAttributesTable(*mut efi::MemoryAttributesTable);
 
+// SAFETY: MemoryAttributesTable is only accesed under an InterruptibleMutex.
+unsafe impl Send for MemoryAttributesTable {}
+
+// We cache the MAT here because we need to free it in whenever we get a new runtime code/data allocation
+static MEMORY_ATTRIBUTES_TABLE: InterruptibleMutex<MemoryAttributesTable> =
+    InterruptibleMutex::new(MemoryAttributesTable(core::ptr::null_mut()), "MemoryAttributesTableLock");
+
 // this is a flag to indicate that we have passed ReadyToBoot and can install the MAT on the next runtime memory
 // allocation/deallocation
-static POST_RTB: AtomicBool = AtomicBool::new(false);
+static POST_RTB: InterruptibleMutex<bool> = InterruptibleMutex::new(false, "PostRtbFlagLock");
 
 impl MemoryAttributesTable {
     ///
@@ -54,7 +53,7 @@ impl MemoryAttributesTable {
     /// ```
     ///
     pub fn install() {
-        if POST_RTB.load(Ordering::Relaxed) {
+        if *POST_RTB.lock() {
             core_install_memory_attributes_table()
         }
     }
@@ -99,7 +98,7 @@ extern "efiapi" fn core_install_memory_attributes_table_event_wrapper(event: efi
     core_install_memory_attributes_table();
     // now we want to capture any future runtime memory changes, so we will mark that ReadyToBoot has occurred
     // and the install callback will be invoked on the next runtime memory allocation
-    POST_RTB.store(true, Ordering::Relaxed);
+    *POST_RTB.lock() = true;
 
     if let Err(status) = EVENT_DB.close_event(event) {
         log::error!("Failed to close MAT ready to boot event with status {status:#X?}. This should be okay.");
@@ -110,7 +109,7 @@ pub fn core_install_memory_attributes_table() {
     let mut st_guard = systemtables::SYSTEM_TABLE.lock();
     let st = st_guard.as_mut().expect("System table support not initialized");
 
-    let current_ptr = MEMORY_ATTRIBUTES_TABLE.load(Ordering::Relaxed);
+    let current_ptr = MEMORY_ATTRIBUTES_TABLE.lock().0;
     if current_ptr.is_null() {
         // we need to install an empty configuration table the first time here, because core_install_configuration_table
         // may allocate runtime memory. Because it actually gets installed we need to allocate one here, it will be
@@ -126,8 +125,8 @@ pub fn core_install_memory_attributes_table() {
                         reserved: 0,
                         entry: [],
                     };
-                    MEMORY_ATTRIBUTES_TABLE.store(empty_ptr, Ordering::Relaxed);
 
+                    *MEMORY_ATTRIBUTES_TABLE.lock() = MemoryAttributesTable(empty_ptr as *mut _);
                     if let Err(status) =
                         core_install_configuration_table(efi::MEMORY_ATTRIBUTES_TABLE_GUID, empty_ptr, st)
                     {
@@ -230,13 +229,13 @@ pub fn core_install_memory_attributes_table() {
 
                     Ok(_) => {
                         // free the old MAT table if we have one
-                        let current_ptr = MEMORY_ATTRIBUTES_TABLE.load(Ordering::Relaxed);
+                        let current_ptr = MEMORY_ATTRIBUTES_TABLE.lock().0;
                         if !current_ptr.is_null()
-                            && let Err(err) = core_free_pool(current_ptr)
+                            && let Err(err) = core_free_pool(current_ptr as *mut _)
                         {
                             log::error!("Error freeing previous MAT pointer: {err:#X?}");
                         }
-                        MEMORY_ATTRIBUTES_TABLE.store(void_ptr, Ordering::Relaxed);
+                        *MEMORY_ATTRIBUTES_TABLE.lock() = MemoryAttributesTable(mat_ptr);
                     }
                 }
             }
@@ -263,8 +262,8 @@ mod tests {
 
     fn with_locked_state<F: Fn() + std::panic::RefUnwindSafe>(f: F) {
         test_support::with_global_lock(|| {
-            POST_RTB.store(false, Ordering::Relaxed);
-            MEMORY_ATTRIBUTES_TABLE.store(core::ptr::null_mut(), Ordering::Relaxed);
+            *POST_RTB.lock() = false;
+            *MEMORY_ATTRIBUTES_TABLE.lock() = MemoryAttributesTable(core::ptr::null_mut());
 
             unsafe {
                 test_support::init_test_gcd(None);
@@ -273,8 +272,8 @@ mod tests {
             }
             f();
 
-            POST_RTB.store(false, Ordering::Relaxed);
-            MEMORY_ATTRIBUTES_TABLE.store(core::ptr::null_mut(), Ordering::Relaxed);
+            *POST_RTB.lock() = false;
+            *MEMORY_ATTRIBUTES_TABLE.lock() = MemoryAttributesTable(core::ptr::null_mut());
         })
         .unwrap();
     }
@@ -331,25 +330,25 @@ mod tests {
             }
 
             // before we create the MAT, we expect MEMORY_ATTRIBUTES_TABLE to be None
-            assert!(MEMORY_ATTRIBUTES_TABLE.load(Ordering::Relaxed).is_null());
+            assert!(MEMORY_ATTRIBUTES_TABLE.lock().0.is_null());
 
             // Create a dummy event
             let dummy_event: efi::Event = core::ptr::null_mut();
 
             // Ensure POST_RTB is false before the event
-            assert!(!POST_RTB.load(Ordering::Relaxed));
+            assert!(!*POST_RTB.lock());
 
             // Call the event wrapper
             core_install_memory_attributes_table_event_wrapper(dummy_event, core::ptr::null_mut());
 
             // Check if POST_RTB is set after the event
-            assert!(POST_RTB.load(Ordering::Relaxed));
+            assert!(*POST_RTB.lock());
 
             // Check if MEMORY_ATTRIBUTES_TABLE is set after installation
-            assert!(!MEMORY_ATTRIBUTES_TABLE.load(Ordering::Relaxed).is_null());
-            let mat_ptr = MEMORY_ATTRIBUTES_TABLE.load(Ordering::Relaxed);
+            assert!(!MEMORY_ATTRIBUTES_TABLE.lock().0.is_null());
+            let mat_ptr = MEMORY_ATTRIBUTES_TABLE.lock().0;
             unsafe {
-                let mat = &*(mat_ptr as *const _ as *const efi::MemoryAttributesTable);
+                let mat: &efi::MemoryAttributesTable = &*(mat_ptr as *const _);
 
                 assert_eq!(mat.version, efi::MEMORY_ATTRIBUTES_TABLE_VERSION);
                 // we have one extra entry here because init_system_table allocates runtime pages
