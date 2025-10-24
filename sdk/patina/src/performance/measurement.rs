@@ -58,7 +58,7 @@ pub mod event_callback {
     /// Reports the Firmware Basic Boot Performance Table (FBPT) record buffer.
     pub extern "efiapi" fn report_fbpt_record_buffer<BB, B, RR, R, F>(
         event: efi::Event,
-        ctx: Box<(BB, RR, &TplMutex<'static, F, B>)>,
+        ctx: Box<(BB, RR, &TplMutex<F, B>)>,
     ) where
         BB: AsRef<B> + Clone,
         B: BootServices + 'static,
@@ -111,7 +111,7 @@ pub mod event_callback {
     /// Adds SMM performance records to the Firmware Basic Boot Performance Table (FBPT).
     pub extern "efiapi" fn fetch_and_add_mm_performance_records<BB, B, F>(
         event: efi::Event,
-        ctx: Box<(BB, MmCommRegion, &TplMutex<'static, F, B>)>,
+        ctx: Box<(BB, MmCommRegion, &TplMutex<F, B>)>,
     ) where
         BB: AsRef<B> + Clone,
         B: BootServices + 'static,
@@ -284,7 +284,7 @@ fn _create_performance_measurement<B, F>(
     perf_id: u16,
     attribute: PerfAttribute,
     boot_services: &B,
-    fbpt: &TplMutex<'static, F, B>,
+    fbpt: &TplMutex<F, B>,
 ) -> Result<(), Error>
 where
     B: BootServices,
@@ -581,8 +581,6 @@ mod tests {
         let status_code_runtime_protocol_ptr = status_code_runtime_protocol.as_mut_ptr();
 
         let mut boot_services = MockBootServices::new();
-        boot_services.expect_raise_tpl().returning(|tpl| tpl);
-        boot_services.expect_restore_tpl().return_const(());
 
         // Test that the event is close so it run only one time.
         boot_services.expect_close_event().once().return_const(Ok(()));
@@ -607,7 +605,11 @@ mod tests {
         let mut fbpt = MockFirmwareBasicBootPerfTable::new();
         fbpt.expect_report_table::<MockBootServices>().once().returning(|_, _| Ok(1));
 
-        let fbpt = TplMutex::new(unsafe { &*ptr::addr_of!(boot_services) }, Tpl::NOTIFY, fbpt);
+        let mut tpl_boot_services = MockBootServices::new();
+        tpl_boot_services.expect_raise_tpl().returning(|tpl| tpl);
+        tpl_boot_services.expect_restore_tpl().return_const(());
+
+        let fbpt = TplMutex::new(tpl_boot_services, Tpl::NOTIFY, fbpt);
         let fbpt = unsafe { &*ptr::addr_of!(fbpt) };
 
         event_callback::report_fbpt_record_buffer(
@@ -621,6 +623,11 @@ mod tests {
     #[test]
     fn test_create_performance_measurement() {
         set_perf_measurement_mask(u32::MAX);
+
+        let mut tpl_boot_services = MockBootServices::new();
+        tpl_boot_services.expect_raise_tpl().returning(|tpl| tpl);
+        tpl_boot_services.expect_restore_tpl().return_const(());
+
         let mut boot_services = MockBootServices::new();
 
         let mut loaded_image_protocol = MaybeUninit::<efi::protocols::loaded_image::Protocol>::zeroed();
@@ -640,12 +647,10 @@ mod tests {
         boot_services.expect_handle_protocol::<efi::protocols::loaded_image::Protocol>().returning(move |_| unsafe {
             Ok((loaded_image_protocol_address as *mut efi::protocols::loaded_image::Protocol).as_mut().unwrap())
         });
-        boot_services.expect_raise_tpl().returning(|tpl| tpl);
-        boot_services.expect_restore_tpl().return_const(());
 
         let mut fbpt = MockFirmwareBasicBootPerfTable::new();
         fbpt.expect_add_record().times(EXPECTED_NUMBER_OF_RECORD).returning(|_| Ok(()));
-        let fbpt = TplMutex::new(unsafe { &*ptr::addr_of!(boot_services) }, Tpl::NOTIFY, fbpt);
+        let fbpt = TplMutex::new(tpl_boot_services, Tpl::NOTIFY, fbpt);
 
         // These functions call create_performance_measurement with the right arguments.
         let module_handle = 1_usize as efi::Handle;
@@ -655,7 +660,7 @@ mod tests {
         let event_guid = efi::Guid::from_bytes(&[3; 16]);
 
         static mut BOOT_SERVICES: Option<&MockBootServices> = None;
-        static mut FBPT: Option<&TplMutex<'static, MockFirmwareBasicBootPerfTable, MockBootServices>> = None;
+        static mut FBPT: Option<&TplMutex<MockFirmwareBasicBootPerfTable, MockBootServices>> = None;
 
         unsafe {
             BOOT_SERVICES = Some(&*ptr::addr_of!(boot_services));

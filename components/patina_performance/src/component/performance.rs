@@ -88,7 +88,7 @@ impl Performance {
         runtime_services: RR,
         records_buffers_hobs: Option<P>,
         mm_comm_region: Option<MmCommRegion>,
-        fbpt: &'static TplMutex<'static, F, B>,
+        fbpt: &'static TplMutex<F, B>,
     ) -> Result<(), EfiError>
     where
         BB: AsRef<B> + Clone + 'static,
@@ -191,9 +191,11 @@ mod tests {
 
     #[test]
     fn test_entry_point() {
+        let mut tpl_boot_services = MockBootServices::new();
+        tpl_boot_services.expect_raise_tpl().return_const(Tpl::APPLICATION);
+        tpl_boot_services.expect_restore_tpl().return_const(());
+
         let mut boot_services = MockBootServices::new();
-        boot_services.expect_raise_tpl().return_const(Tpl::APPLICATION);
-        boot_services.expect_restore_tpl().return_const(());
 
         // Test that the protocol in installed.
         boot_services
@@ -211,7 +213,7 @@ mod tests {
             .expect_create_event_ex::<Box<(
                 Rc<MockBootServices>,
                 Rc<MockRuntimeServices>,
-                &TplMutex<'static, MockFirmwareBasicBootPerfTable, MockBootServices>,
+                &TplMutex<MockFirmwareBasicBootPerfTable, MockBootServices>,
             )>>()
             .once()
             .withf_st(|event_type, notify_tpl, notify_function, _notify_context, event_group| {
@@ -237,7 +239,7 @@ mod tests {
             .expect_create_event_ex::<Box<(
                 Rc<MockBootServices>,
                 MmCommRegion,
-                &TplMutex<'static, MockFirmwareBasicBootPerfTable, MockBootServices>,
+                &TplMutex<MockFirmwareBasicBootPerfTable, MockBootServices>,
             )>>()
             .once()
             .withf_st(|event_type, notify_tpl, notify_function, _notify_context, event_group| {
@@ -279,7 +281,7 @@ mod tests {
         let mut fbpt = MockFirmwareBasicBootPerfTable::new();
         fbpt.expect_set_perf_records().once().return_const(());
 
-        let fbpt = TplMutex::new(unsafe { &*ptr::addr_of!(boot_services) }, Tpl::NOTIFY, fbpt);
+        let fbpt = TplMutex::new(tpl_boot_services, Tpl::NOTIFY, fbpt);
         let fbpt = unsafe { &*ptr::addr_of!(fbpt) };
 
         let _ = Performance._entry_point(
