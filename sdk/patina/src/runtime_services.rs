@@ -19,12 +19,7 @@ pub mod variable_services;
 use mockall::automock;
 
 use alloc::vec::Vec;
-use core::{
-    ffi::c_void,
-    fmt::Debug,
-    ptr,
-    sync::atomic::{AtomicPtr, Ordering},
-};
+use core::{cell::OnceCell, ffi::c_void, fmt::Debug, ptr};
 
 use r_efi::efi;
 use variable_services::{GetVariableStatus, VariableInfo};
@@ -33,49 +28,54 @@ use variable_services::{GetVariableStatus, VariableInfo};
 /// Wrapper around [`efi::RuntimeServices`]
 ///
 /// UEFI Spec Documentation: [8. Services - RuntimeServices](https://uefi.org/specs/UEFI/2.10/08_Services_Runtime_Services.html)
+#[derive(Clone)]
 pub struct StandardRuntimeServices {
-    efi_runtime_services: AtomicPtr<efi::RuntimeServices>,
+    efi_runtime_services: OnceCell<*mut efi::RuntimeServices>,
 }
 
 impl StandardRuntimeServices {
     /// Create a new StandardRuntimeServices with the provided [efi::RuntimeServices].
-    pub fn new(efi_runtime_services: &efi::RuntimeServices) -> Self {
+    ///
+    /// # Safety
+    /// Caller must ensure that this routine is invoked in a thread-safe manner to avoid data races when initializing
+    /// efi::RuntimeServices reference.
+    pub unsafe fn new(efi_runtime_services: &'static efi::RuntimeServices) -> Self {
         let this = StandardRuntimeServices::new_uninit();
-        this.init(efi_runtime_services);
+        // SAFETY: safety contract of this function is the same as that of Self::init().
+        unsafe { this.init(efi_runtime_services) };
         this
     }
 
-    /// Create a new StandarRuntimeServices that is not initialized.
+    /// Create a new StandardRuntimeServices that is not initialized.
     pub const fn new_uninit() -> Self {
-        Self { efi_runtime_services: AtomicPtr::new(ptr::null_mut()) }
+        Self { efi_runtime_services: OnceCell::new() }
     }
 
     /// Initialized the StandardRuntimeServices.
-    pub fn init(&self, efi_runtime_services: &efi::RuntimeServices) {
-        self.efi_runtime_services.store(efi_runtime_services as *const _ as *mut _, Ordering::Relaxed);
+    ///
+    /// # Safety
+    /// Caller must ensure that this routine is invoked in a thread-safe manner to avoid data races when initializing
+    /// efi::RuntimeServices reference.
+    pub unsafe fn init(&self, efi_runtime_services: &'static efi::RuntimeServices) {
+        self.efi_runtime_services.set(efi_runtime_services as *const _ as *mut _).unwrap();
     }
 
     /// Return true if StandardRuntimeServices is initialized.
     pub fn is_init(&self) -> bool {
-        !self.efi_runtime_services.load(Ordering::Relaxed).is_null()
+        self.efi_runtime_services.get().is_some()
     }
 
     fn efi_runtime_services(&self) -> &efi::RuntimeServices {
         // SAFETY: Runtime services lifetime is expected to live long enough.
-        unsafe { self.efi_runtime_services.load(Ordering::Relaxed).as_ref() }
-            .expect("Standard Runtime Services is not initialized!")
+        unsafe {
+            self.efi_runtime_services.get().expect("Standard Runtime Services is not initialized!").as_ref().unwrap()
+        }
     }
 }
 
 impl AsRef<StandardRuntimeServices> for StandardRuntimeServices {
     fn as_ref(&self) -> &StandardRuntimeServices {
         self
-    }
-}
-
-impl Clone for StandardRuntimeServices {
-    fn clone(&self) -> Self {
-        Self { efi_runtime_services: AtomicPtr::new(self.efi_runtime_services.load(Ordering::Relaxed)) }
     }
 }
 
@@ -452,7 +452,10 @@ pub(crate) mod test {
                 )*
                 rs.assume_init()
             };
-            StandardRuntimeServices::new(&efi_runtime_services)
+
+            // For this test code, deliberately leak the boot services to have a 'static lifetime.
+            let efi_runtime_services = Box::leak(Box::new(efi_runtime_services));
+            unsafe { StandardRuntimeServices::new(efi_runtime_services) }
         }};
     }
 
