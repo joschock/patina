@@ -26,12 +26,12 @@ use alloc::vec::Vec;
 use c_ptr::{CMutPtr, CMutRef, CPtr, PtrMetadata};
 use core::{
     any,
+    cell::OnceCell,
     ffi::c_void,
     fmt::Debug,
     mem::{self, MaybeUninit},
     option::Option,
-    ptr::{self, NonNull},
-    sync::atomic::{AtomicPtr, Ordering},
+    ptr::{self, NonNull}
 };
 
 use r_efi::efi;
@@ -45,50 +45,57 @@ use tpl::{Tpl, TplGuard};
 
 /// This is the boot services used in the UEFI.
 /// It wraps an atomic ptr to [`efi::BootServices`]
+
+#[derive(Clone)]
 pub struct StandardBootServices {
-    efi_boot_services: AtomicPtr<efi::BootServices>,
+    efi_boot_services: OnceCell<*mut efi::BootServices>,
 }
+
+// SAFETY: StandardBootServices::init() is unsafe requiring caller to assume responsibility for avoiding data races.
+unsafe impl Sync for StandardBootServices {}
 
 impl StandardBootServices {
     /// Create a new StandardBootServices with the provided [efi::BootServices].
-    pub fn new(efi_boot_services: &efi::BootServices) -> Self {
+    ///
+    /// # Safety
+    /// Caller must ensure that this routine is invoked in a thread-safe manner to avoid data races when initializing
+    /// efi::BootServices reference.
+    pub unsafe fn new(efi_boot_services: &'static efi::BootServices) -> Self {
         let this = Self::new_uninit();
-        this.init(efi_boot_services);
+        // SAFETY: safety contract of this function is the same as that of Self::init().
+        unsafe { this.init(efi_boot_services) };
         this
     }
 
     /// Create a new StandarBootServices that has not been initialized.
     pub const fn new_uninit() -> Self {
-        StandardBootServices { efi_boot_services: AtomicPtr::new(ptr::null_mut()) }
+        StandardBootServices { efi_boot_services: OnceCell::new() }
     }
 
     /// Initialize the StandardBootServices.
-    pub fn init(&self, efi_boot_services: &efi::BootServices) {
+    ///
+    /// # Safety
+    /// Caller must ensure that this routine is invoked in a thread-safe manner to avoid data races when initializing
+    /// the efi::BootServices pointer.
+    pub unsafe fn init(&self, efi_boot_services: &'static efi::BootServices) {
         // This struct never mutate the efi_boot_services.
-        self.efi_boot_services.store(efi_boot_services as *const _ as *mut _, Ordering::Relaxed);
+        self.efi_boot_services.set(efi_boot_services as *const _ as *mut _).unwrap();
     }
 
     /// Return true if StandardBootServices is initialized.
     pub fn is_init(&self) -> bool {
-        !self.efi_boot_services.load(Ordering::Relaxed).is_null()
+        self.efi_boot_services.get().is_some()
     }
 
     fn efi_boot_services(&self) -> &efi::BootServices {
         // SAFETY: Boot services lifetime is expected to live long enough.
-        unsafe { self.efi_boot_services.load(Ordering::Relaxed).as_ref() }
-            .expect("Standard Boot Services is not initialized!")
+        unsafe { self.efi_boot_services.get().expect("Standard Boot Services is not initialized!").as_ref().unwrap() }
     }
 }
 
 impl AsRef<StandardBootServices> for StandardBootServices {
     fn as_ref(&self) -> &StandardBootServices {
         self
-    }
-}
-
-impl Clone for StandardBootServices {
-    fn clone(&self) -> Self {
-        Self { efi_boot_services: AtomicPtr::new(self.efi_boot_services.load(Ordering::Relaxed)) }
     }
 }
 
@@ -1586,7 +1593,9 @@ mod tests {
                 )*
                 bs.assume_init()
             };
-            StandardBootServices::new(&efi_boot_services)
+            // For this test code, deliberately leak the boot services to have a 'static lifetime.
+            let efi_boot_services = Box::leak(Box::new(efi_boot_services));
+            unsafe { StandardBootServices::new(efi_boot_services) }
         }};
     }
 
