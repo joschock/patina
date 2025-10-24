@@ -12,7 +12,6 @@ use core::{
     cell::UnsafeCell,
     fmt::{self, Debug, Display},
     ops::{Deref, DerefMut},
-    sync::atomic::{AtomicBool, Ordering},
 };
 
 use crate::boot_services::{BootServices, StandardBootServices, tpl::Tpl};
@@ -23,7 +22,7 @@ use crate::boot_services::{BootServices, StandardBootServices, tpl::Tpl};
 pub struct TplMutex<'a, T: ?Sized, B: BootServices = StandardBootServices> {
     boot_services: &'a B,
     tpl_lock_level: Tpl,
-    lock: AtomicBool,
+    lock: UnsafeCell<bool>,
     data: UnsafeCell<T>,
 }
 
@@ -37,7 +36,7 @@ pub struct TplMutexGuard<'a, T: ?Sized, B: BootServices> {
 impl<'a, T, B: BootServices> TplMutex<'a, T, B> {
     /// Create an new TplMutex in an unlock state.
     pub const fn new(boot_services: &'a B, tpl_lock_level: Tpl, data: T) -> Self {
-        Self { boot_services, tpl_lock_level, lock: AtomicBool::new(false), data: UnsafeCell::new(data) }
+        Self { boot_services, tpl_lock_level, lock: UnsafeCell::new(false), data: UnsafeCell::new(data) }
     }
 }
 
@@ -46,6 +45,7 @@ impl<'a, T: ?Sized, B: BootServices> TplMutex<'a, T, B> {
     ///
     /// # Panics
     /// This call will panic if the mutex is already locked.
+    /// This call will panic if locking is attempted at a higher TPL level than the mutex's TPL level
     pub fn lock(&'a self) -> TplMutexGuard<'a, T, B> {
         self.try_lock().map_err(|_| "Re-entrant lock").unwrap()
     }
@@ -54,19 +54,29 @@ impl<'a, T: ?Sized, B: BootServices> TplMutex<'a, T, B> {
     ///
     /// # Errors
     /// If the mutex is already lock, then this call will return [Err].
+    ///
+    /// # Panics
+    /// This call will panic if locking is attempted at a higher TPL level than the mutex's TPL level
     #[allow(clippy::result_unit_err)]
     pub fn try_lock(&'a self) -> Result<TplMutexGuard<'a, T, B>, ()> {
-        self.lock
-            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .map(|_| TplMutexGuard { release_tpl: self.boot_services.raise_tpl(self.tpl_lock_level), tpl_mutex: self })
-            .map_err(|_| ())
+        let release_tpl = self.boot_services.raise_tpl(self.tpl_lock_level);
+        // SAFETY: TPL is raised to prevent preemption while checking and setting the lock.
+        if unsafe { self.lock.get().read_volatile() } {
+            self.boot_services.restore_tpl(release_tpl);
+            Err(())
+        } else {
+            // SAFETY: TPL is raised to prevent preemption while checking and setting the lock.
+            unsafe {self.lock.get().write_volatile(true) };
+            Ok(TplMutexGuard { release_tpl, tpl_mutex: self })
+        }
     }
 }
 
 impl<T: ?Sized, B: BootServices> Drop for TplMutexGuard<'_, T, B> {
     fn drop(&mut self) {
+        // SAFETY: TPL is still raised, so no preemption can occur while unlocking.
+        unsafe { self.tpl_mutex.lock.get().write_volatile(false) };
         self.tpl_mutex.boot_services.restore_tpl(self.release_tpl);
-        self.tpl_mutex.lock.store(false, Ordering::Release);
     }
 }
 
