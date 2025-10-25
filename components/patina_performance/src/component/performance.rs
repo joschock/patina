@@ -55,14 +55,14 @@ impl Performance {
             return Ok(());
         }
 
-        set_perf_measurement_mask(config.enabled_measurements);
-
         set_static_state(StandardBootServices::clone(&boot_services)).unwrap_or_else(|_| {
             log::error!(
                 "[{}]: Performance static state was set somewhere else. It should only be set here!",
                 function!()
             );
         });
+
+        set_perf_measurement_mask(config.enabled_measurements);
 
         let Some((_, fbpt)) = get_static_state() else {
             log::error!("[{}]: Performance static state was not initialized properly.", function!());

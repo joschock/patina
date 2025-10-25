@@ -554,9 +554,9 @@ mod tests {
     use mockall::predicate;
 
     use crate::{
-        boot_services::{MockBootServices, c_ptr::CMutPtr, tpl::Tpl},
+        boot_services::{MockBootServices, StandardBootServices, c_ptr::CMutPtr, tpl::Tpl},
         performance::{
-            globals::set_perf_measurement_mask,
+            globals::{set_perf_measurement_mask, set_static_state},
             logging::*,
             table::{FirmwarePerformanceVariable, MockFirmwareBasicBootPerfTable},
         },
@@ -622,6 +622,20 @@ mod tests {
 
     #[test]
     fn test_create_performance_measurement() {
+        let boot_services = core::mem::MaybeUninit::zeroed();
+        let mut boot_services: efi::BootServices = unsafe { boot_services.assume_init() };
+
+        // Create dummy function pointers to use for initialization
+        extern "efiapi" fn dummy_raise_tpl(_new_tpl: efi::Tpl) -> efi::Tpl {
+            0
+        }
+        extern "efiapi" fn dummy_restore_tpl(_old_tpl: efi::Tpl) {}
+
+        boot_services.raise_tpl = dummy_raise_tpl;
+        boot_services.restore_tpl = dummy_restore_tpl;
+        let static_boot_services = unsafe { StandardBootServices::new(Box::leak(Box::new(boot_services))) };
+        set_static_state(static_boot_services).unwrap();
+
         set_perf_measurement_mask(u32::MAX);
 
         let mut tpl_boot_services = MockBootServices::new();
