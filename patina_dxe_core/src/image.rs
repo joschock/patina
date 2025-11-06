@@ -7,7 +7,7 @@
 //! SPDX-License-Identifier: Apache-2.0
 //!
 use alloc::{boxed::Box, collections::BTreeMap, string::String, vec, vec::Vec};
-use core::{convert::TryInto, ffi::c_void, mem::transmute, slice, slice::from_raw_parts};
+use core::{convert::TryInto, ffi::c_void, fmt, mem::transmute, slice::{self, from_raw_parts}};
 use goblin::pe::section_table;
 use patina::{
     base::{DEFAULT_CACHE_ATTR, UEFI_PAGE_SIZE, align_up},
@@ -101,6 +101,10 @@ impl ImageStack {
             // debug_assert!(false);
         }
 
+        unsafe {
+            (*core::ptr::slice_from_raw_parts_mut((stack + (UEFI_PAGE_SIZE as u64)) as *mut u8, len)).fill(0);
+        }
+
         // we have the guard page at the bottom, so we need to add a page to the stack pointer for the limit
         Ok(ImageStack {
             stack: core::ptr::slice_from_raw_parts_mut((stack + (UEFI_PAGE_SIZE as u64)) as *mut u8, len),
@@ -155,6 +159,16 @@ unsafe impl Stack for ImageStack {
         //stack grows downward, so "limit" is the lowest address, i.e. the ptr.
         StackPointer::new(self.stack as *const u8 as usize)
             .expect("Stack pointer address was zero, but it should always be nonzero.")
+    }
+}
+
+impl fmt::Debug for ImageStack {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ImageStack")
+            .field("stack", &self.stack.addr())
+            .field("len", &self.len)
+            .field("allocated_pages", &self.allocated_pages)
+            .finish()
     }
 }
 
@@ -1260,7 +1274,7 @@ pub fn core_start_image(image_handle: efi::Handle) -> Result<(), efi::Status> {
 
     // allocate a buffer for the entry point stack.
     let stack = ImageStack::new(ENTRY_POINT_STACK_SIZE)?;
-
+    log::info!("start_image allocated stack at {:#x?}", stack);
     perf_image_start_begin(image_handle, create_performance_measurement);
 
     // define a co-routine that wraps the entry point execution. this doesn't

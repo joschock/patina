@@ -262,6 +262,7 @@ impl PageAllocator for PagingAllocator<'_> {
                         None,
                     ) {
                         Ok(addr) => {
+                            log::info!("OSDDEBUG allocated {} pages for page table page pool at {:#x}", len, addr);
                             for i in 0..len {
                                 self.page_pool.push(addr as u64 + ((i * UEFI_PAGE_SIZE) as u64));
                             }
@@ -337,7 +338,7 @@ impl GCD {
         self.maximum_address = 1 << processor_address_bits;
     }
 
-    unsafe fn init_memory_blocks(
+    pub(crate) unsafe fn init_memory_blocks(
         &mut self,
         memory_type: dxe_services::GcdMemoryType,
         base_address: usize,
@@ -421,11 +422,12 @@ impl GCD {
         ensure!(self.maximum_address != 0, EfiError::NotReady);
         ensure!(len > 0, EfiError::InvalidParameter);
         ensure!(base_address.checked_add(len).is_some_and(|sum| sum <= self.maximum_address), EfiError::Unsupported);
+        ensure!(self.memory_blocks.capacity() > 0, EfiError::NotReady);
 
-        log::trace!(target: "allocations", "[{}] Adding memory space at {:#x}", function!(), base_address);
-        log::trace!(target: "allocations", "[{}]   Length: {:#x}", function!(), len);
-        log::trace!(target: "allocations", "[{}]   Memory Type: {:?}", function!(), memory_type);
-        log::trace!(target: "allocations", "[{}]   Capabilities: {:#x}\n", function!(), capabilities);
+        log::info!(target: "add_memory_space", "[{}] Adding memory space at {:#x}", function!(), base_address);
+        log::info!(target: "add_memory_space", "[{}]   Length: {:#x}", function!(), len);
+        log::info!(target: "add_memory_space", "[{}]   Memory Type: {:?}", function!(), memory_type);
+        log::info!(target: "add_memory_space", "[{}]   Capabilities: {:#x}\n", function!(), capabilities);
 
         // All software capabilities are supported for system memory
         capabilities |= efi::MEMORY_ACCESS_MASK | efi::MEMORY_RUNTIME;
@@ -435,9 +437,6 @@ impl GCD {
             capabilities |= efi::MEMORY_ISA_VALID;
         }
 
-        if self.memory_blocks.capacity() == 0 {
-            return unsafe { self.init_memory_blocks(memory_type, base_address, len, capabilities) };
-        }
         let memory_blocks = &mut self.memory_blocks;
 
         log::trace!(target: "gcd_measure", "search");
@@ -1851,6 +1850,23 @@ impl SpinLockedGcd {
             ],
             page_table: tpl_lock::TplMutex::new(efi::TPL_HIGH_LEVEL, None, "GcdPageTableLock"),
         }
+    }
+
+    /// Initializes the memory blocks in the GCD.
+    ///
+    /// # Safety
+    /// The caller must ensure that the memory region specified by `base_address` and `len` is valid and not
+    /// currently in use by any other part of the system.
+    #[coverage(off)]
+    pub(crate) unsafe fn init_memory_blocks(
+        &self,
+        memory_type: dxe_services::GcdMemoryType,
+        base_address: usize,
+        len: usize,
+        capabilities: u64,
+    ) -> Result<usize, EfiError> {
+        // SAFETY: Caller must uphold the safety contract of init_memory_blocks
+        unsafe { self.memory.lock().init_memory_blocks(memory_type, base_address, len, capabilities) }
     }
 
     pub fn prioritize_32_bit_memory(&self, value: bool) {
