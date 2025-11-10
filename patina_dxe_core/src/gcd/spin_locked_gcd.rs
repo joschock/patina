@@ -600,7 +600,7 @@ impl GCD {
         match self.set_gcd_memory_attributes(
             base_address,
             len,
-            efi::MEMORY_RP | (desc.attributes & efi::CACHE_ATTRIBUTE_MASK),
+            efi::MEMORY_RP | efi::MEMORY_XP | (desc.attributes & efi::CACHE_ATTRIBUTE_MASK),
         ) {
             Ok(_) => Ok(()),
             Err(e) => {
