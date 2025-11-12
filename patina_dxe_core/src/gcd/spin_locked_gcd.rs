@@ -2712,6 +2712,26 @@ unsafe impl Send for SpinLockedGcd {}
 #[cfg(test)]
 #[coverage(off)]
 mod tests {
+    //! GCD (Global Coherency Domain) test module.
+    //!
+    //! # Safety Notes
+    //!
+    //! This test module extensively uses `unsafe` for the following operations:
+    //!
+    //! ## Memory Allocation (`get_memory`)
+    //! - Allocates memory from the system allocator with UEFI page alignment
+    //! - Returns 'static lifetime slices that are intentionally leaked for test simplicity
+    //! - Memory is valid for the entire test duration
+    //!
+    //! ## GCD Operations (`add_memory_space`, `init_memory_blocks`, etc.)
+    //! - These functions are unsafe because they operate on raw memory addresses
+    //! - In tests, all memory addresses come from controlled allocations via `get_memory`
+    //! - All memory regions are valid and properly aligned
+    //! - Test isolation is ensured via `with_locked_state` which holds a global test lock
+    //!
+    //! ## Global State (`GCD.reset()`)
+    //! - Tests reset global GCD state to ensure test isolation
+    //! - The test lock prevents concurrent access during reset operations
     extern crate std;
     use core::{alloc::Layout, sync::atomic::AtomicBool};
     use patina::base::align_up;
@@ -2739,10 +2759,12 @@ mod tests {
 
     #[test]
     fn test_add_memory_space_before_memory_blocks_instantiated() {
+        // SAFETY: Test memory allocation - memory is valid and properly aligned.
         let mem = unsafe { get_memory(MEMORY_BLOCK_SLICE_SIZE) };
         let address = mem.as_ptr() as usize;
         let mut gcd = GCD::new(48);
 
+        // SAFETY: GCD test operation - address comes from controlled allocation above.
         assert_eq!(
             Err(EfiError::NotReady),
             unsafe { gcd.add_memory_space(dxe_services::GcdMemoryType::Reserved, address, MEMORY_BLOCK_SLICE_SIZE, 0) },
@@ -4076,7 +4098,10 @@ mod tests {
     }
 
     unsafe fn get_memory(size: usize) -> &'static mut [u8] {
+        // SAFETY: Allocates memory from the system allocator with UEFI page alignment.
+        // The returned slice is intentionally leaked for test simplicity and valid for 'static lifetime.
         let addr = unsafe { alloc::alloc::alloc(alloc::alloc::Layout::from_size_align(size, UEFI_PAGE_SIZE).unwrap()) };
+        // SAFETY: The allocated pointer is valid for `size` bytes and properly aligned.
         unsafe { core::slice::from_raw_parts_mut(addr, size) }
     }
 
