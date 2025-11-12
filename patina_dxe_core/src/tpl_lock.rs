@@ -1,6 +1,12 @@
-//! UEFI Task Priority Level (TPL) Locking support
+//! TplMutex: Mutex implementation taht also adjusts UEFI TPL levels.
 //!
-//! This module provides a Mutex implementation based on UEFI TPL levels.
+//! This module raises and lowers the UEFI TPL level as the primary means of
+//! guarding the mutex critical section.
+//!
+//! This mutex guarantees that the critical section protected by the guard
+//! cannot be interrupted by code running at TPL equal to or lower than the
+//! lock's TPL level. At TPL_HIGH_LEVEL, interrupts are disabled, so that
+//! means that the critical section cannot be interrupted by anything.
 //!
 //! ## License
 //!
@@ -11,45 +17,23 @@ use core::{
     cell::UnsafeCell,
     fmt,
     ops::{Deref, DerefMut},
-    sync::atomic::{AtomicBool, AtomicPtr, Ordering},
 };
 
 use r_efi::efi;
 
-static BOOT_SERVICES_PTR: AtomicPtr<efi::BootServices> = AtomicPtr::new(core::ptr::null_mut());
-
-/// Called to initialize the global TplLock BootServices pointer. Prior to this call, TPL locks are collapsed to a basic
-/// lock with no TPL interaction. Afterwards, all TPL locks will adjust TPL according to the TPL they were initialized
-/// with.
-///
-// Design Note: While it would be preferable to avoid a global static BOOT_SERVICES_PTR, the alternative would require
-// boot services to be available whenever a new lock is instantiated. This would have two drawbacks: 1) it would mean
-// that lock instantiation could not be `const` - and therefore could not be used to easily initialize global locked
-// statics (which is a primary use case for this crate), and 2) it would mean that locks could not be instantiated
-// before boot services creation. Since these locks are used in many of the structures that are used to implement boot
-// services, this would introduce a cyclical dependency.
-pub fn init_boot_services(boot_services: *mut efi::BootServices) {
-    BOOT_SERVICES_PTR.store(boot_services, Ordering::SeqCst);
-}
-
-fn boot_services() -> Option<&'static mut efi::BootServices> {
-    let boot_services_ptr = BOOT_SERVICES_PTR.load(Ordering::SeqCst);
-    unsafe { boot_services_ptr.as_mut() }
-}
+use crate::events::{raise_tpl, restore_tpl};
 
 /// Used to guard data with a locked MUTEX and TPL level.
 pub struct TplMutex<T: ?Sized> {
     tpl_lock_level: efi::Tpl,
-    lock: AtomicBool,
+    lock: UnsafeCell<bool>,
     name: &'static str,
     data: UnsafeCell<T>,
 }
 /// Wrapper for guarded data, which can be accessed by Deref or DerefMut on this object.
 pub struct TplGuard<'a, T: ?Sized + 'a> {
-    release_tpl: Option<efi::Tpl>,
-    lock: &'a AtomicBool,
-    name: &'static str,
-    data: *mut T,
+    release_tpl: efi::Tpl,
+    mutex: &'a TplMutex<T>,
 }
 
 unsafe impl<T: ?Sized + Send> Sync for TplMutex<T> {}
@@ -61,7 +45,7 @@ unsafe impl<T: ?Sized + Send> Send for TplGuard<'_, T> {}
 impl<T> TplMutex<T> {
     /// Instantiates a new TplMutex with the given TPL level, data object, and name string.
     pub const fn new(tpl_lock_level: efi::Tpl, data: T, name: &'static str) -> Self {
-        Self { tpl_lock_level, lock: AtomicBool::new(false), data: UnsafeCell::new(data), name }
+        Self { tpl_lock_level, lock: UnsafeCell::new(false), data: UnsafeCell::new(data), name }
     }
 }
 
@@ -69,23 +53,32 @@ impl<T: ?Sized> TplMutex<T> {
     /// Lock the TplMutex and return a TplGuard object used to access the data. This will raise the system TPL level
     /// to the level specified at TplMutex creation.
     ///
-    /// Safety: Lock reentrance is not supported; attempt to re-lock something already locked will panic.
+    /// # Panics
+    ///
+    /// Lock re-entrance is not supported; attempt to re-lock something already locked will panic.
+    ///
+    /// Attempting to acquire the lock while running at a TPL level higher than the lock's TPL level will panic due to
+    /// TPL inversion.
     pub fn lock(&self) -> TplGuard<'_, T> {
         self.try_lock().unwrap_or_else(|| panic!("Re-entrant locks for {:?} not permitted.", self.name))
     }
 
     /// Attempts to lock the TplMutex, and if successful, returns a guard object that can be used to access the data.
+    ///
+    /// # Panics
+    ///
+    /// Attempting to acquire the lock while running at a TPL level higher than the lock's TPL level will panic due to
+    /// TPL inversion.
     pub fn try_lock(&self) -> Option<TplGuard<'_, T>> {
-        let boot_services = boot_services();
-        let release_tpl = boot_services.as_ref().map(|bs| (bs.raise_tpl)(self.tpl_lock_level));
-        if self.lock.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_ok() {
-            Some(TplGuard { release_tpl, lock: &self.lock, name: self.name, data: unsafe { &mut *self.data.get() } })
+        let release_tpl = raise_tpl(self.tpl_lock_level);
+        // Safety: raw pointer on lock is used for volatile semantics; pointer is valid by construction, and exclusive
+        // access is guaranteed by TPL raising.
+        if !unsafe { self.lock.get().read_volatile() } {
+            // Safety: see prior comment.
+            unsafe { self.lock.get().write_volatile(true); }
+            Some(TplGuard { release_tpl, mutex: self })
         } else {
-            if let Some(release_tpl) = release_tpl
-                && let Some(bs) = boot_services
-            {
-                (bs.restore_tpl)(release_tpl);
-            }
+            restore_tpl(release_tpl);
             None
         }
     }
@@ -94,8 +87,15 @@ impl<T: ?Sized> TplMutex<T> {
 impl<T: ?Sized + fmt::Debug> fmt::Debug for TplMutex<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self.try_lock() {
-            Some(guard) => write!(f, "Mutex {{ data: ").and_then(|()| (*guard).fmt(f)).and_then(|()| write!(f, "}}")),
-            None => write!(f, "Mutex {{ <locked> }}"),
+            Some(guard) => write!(
+                f,
+                "TplMutex {{ lock_tpl: {:x?}, release_tpl: {:x?}, data: ",
+                self.tpl_lock_level, guard.release_tpl
+            )
+            .and_then(|()| (*guard).fmt(f))
+            .and_then(|()| write!(f, " }}")),
+            None => write!(f, "TplMutex {{ lock_tpl: {:x?}, data: <locked> }}", self.tpl_lock_level),
+
         }
     }
 }
@@ -115,115 +115,122 @@ impl<T: ?Sized + fmt::Display> fmt::Display for TplGuard<'_, T> {
 impl<'a, T: ?Sized> Deref for TplGuard<'a, T> {
     type Target = T;
     fn deref(&self) -> &'a T {
-        //Safety: data is only accessible through the lock, which can only be obtained at the specified TPL.
-        unsafe { &*self.data }
+        // Safety: data is only accessible through the guard, which guarantees mutual exclusion since no higher TPL can
+        // obtain the lock without panic, and no code at equal or lower TPL can interrupt while the lock is held.
+        unsafe {self.mutex.data.get().as_ref().expect("TplMutex data pointer should not be null") }
     }
 }
 
 impl<'a, T: ?Sized> DerefMut for TplGuard<'a, T> {
     fn deref_mut(&mut self) -> &'a mut T {
-        //Safety: data is only accessible through the lock, which can only be obtained at the specified TPL.
-        unsafe { &mut *self.data }
+        // Safety: data is only accessible through the guard, which guarantees mutual exclusion since no higher TPL can
+        // obtain the lock without panic, and no code at equal or lower TPL can interrupt while the lock is held.
+        unsafe {self.mutex.data.get().as_mut().expect("TplMutex data pointer should not be null") }
     }
 }
 
 impl<T: ?Sized> Drop for TplGuard<'_, T> {
     fn drop(&mut self) {
-        self.lock.store(false, Ordering::Release);
-        if let Some(tpl) = self.release_tpl {
-            let bs = boot_services()
-                .unwrap_or_else(|| panic!("Valid release TPL for {:?}, but invalid Boot Services", self.name));
-            (bs.restore_tpl)(tpl);
-        }
+        // Safety: raw pointer on lock is used for volatile semantics; pointer is valid by construction, and exclusive
+        // access is guaranteed by TPL raising.
+        unsafe { self.mutex.lock.get().write_volatile(false); }
+        restore_tpl(self.release_tpl);
     }
 }
 
 #[cfg(test)]
 #[coverage(off)]
 mod tests {
-    extern crate std;
-    use std::{boxed::Box, println};
 
-    use crate::test_support;
+    use crate::events::{raise_tpl, restore_tpl};
 
-    use super::{TplMutex, init_boot_services};
-    use core::{
-        mem::MaybeUninit,
-        sync::atomic::{AtomicUsize, Ordering},
-    };
+    use super::TplMutex;
     use r_efi::efi;
 
-    static TPL: AtomicUsize = AtomicUsize::new(efi::TPL_APPLICATION);
-
-    fn with_locked_state<F: Fn() + std::panic::RefUnwindSafe>(f: F) {
-        test_support::with_global_lock(|| {
+    fn with_reset_state<F: Fn() + std::panic::RefUnwindSafe>(f: F) {
+        let result = crate::test_support::with_global_lock(|| {
+            raise_tpl(efi::TPL_HIGH_LEVEL);
+            restore_tpl(efi::TPL_APPLICATION);
             f();
-            //ensure that TPL mutex doesn't end up with partially initialized
-            //mock boot services - otherwise tests for unrelated implementations that
-            //use TplMutex might end up calling the mocks unexpectedly.
-            init_boot_services(core::ptr::null_mut());
-        })
-        .unwrap();
-    }
-
-    extern "efiapi" fn mock_raise_tpl(new_tpl: efi::Tpl) -> efi::Tpl {
-        let prev_tpl = TPL.load(Ordering::SeqCst);
-
-        assert!(prev_tpl <= new_tpl, "cannot raise tpl to lower than current level.");
-
-        TPL.store(new_tpl, Ordering::SeqCst);
-        prev_tpl
-    }
-
-    extern "efiapi" fn mock_restore_tpl(new_tpl: efi::Tpl) {
-        let prev_tpl = TPL.load(Ordering::SeqCst);
-        assert!(prev_tpl >= new_tpl, "cannot restore tpl to higher than current level.");
-
-        TPL.store(new_tpl, Ordering::SeqCst);
-    }
-
-    fn mock_boot_services() -> *mut efi::BootServices {
-        let boot_services = MaybeUninit::zeroed();
-        // SAFETY: Test code - initializing a zeroed BootServices structure for mocking.
-        // The function pointers are immediately overwritten with valid mock implementations.
-        let mut boot_services: efi::BootServices = unsafe { boot_services.assume_init() };
-        boot_services.raise_tpl = mock_raise_tpl;
-        boot_services.restore_tpl = mock_restore_tpl;
-        Box::into_raw(Box::new(boot_services))
+            raise_tpl(efi::TPL_HIGH_LEVEL);
+            restore_tpl(efi::TPL_APPLICATION);
+        });
+        match result {
+            Ok(()) => {}
+            Err(e) => {
+                std::panic::resume_unwind(e);
+            }
+        }
     }
 
     #[test]
-    fn tpl_mutex_can_be_created() {
-        with_locked_state(|| {
-            let tpl_mutex = TplMutex::new(efi::TPL_HIGH_LEVEL, 1_usize, "test_lock");
-            *tpl_mutex.lock() = 2_usize;
-            assert_eq!(2_usize, *tpl_mutex.lock());
+    fn test_tpl_mutex_basic() {
+        with_reset_state(|| {
+            let lock = TplMutex::new(efi::TPL_NOTIFY, 42, "test_lock");
+            {
+                let guard = lock.lock();
+                assert_eq!(*guard, 42);
+            }
+            {
+                let mut guard = lock.lock();
+                *guard = 43;
+            }
+            {
+                let guard = lock.lock();
+                assert_eq!(*guard, 43);
+            }
         });
     }
 
     #[test]
-    fn tpl_mutex_should_change_tpl_if_bs_available() {
-        with_locked_state(|| {
-            let boot_services = mock_boot_services();
-            let tpl_mutex = TplMutex::new(efi::TPL_NOTIFY, 1_usize, "test_lock");
-            init_boot_services(boot_services);
-
-            let guard = tpl_mutex.lock();
-            assert_eq!(TPL.load(Ordering::SeqCst), efi::TPL_NOTIFY);
-            drop(guard);
-            assert_eq!(TPL.load(Ordering::SeqCst), efi::TPL_APPLICATION);
+    #[should_panic(expected = "Re-entrant locks for \"test_lock\" not permitted.")]
+    fn test_tpl_mutex_reentrant() {
+        with_reset_state(|| {
+            let lock = TplMutex::new(efi::TPL_NOTIFY, 42, "test_lock");
+            let _guard1 = lock.lock();
+            let _guard2 = lock.lock(); // This should panic
         });
     }
 
     #[test]
-    fn tpl_mutex_and_guard_should_support_debug_and_display() {
-        with_locked_state(|| {
-            let tpl_mutex = TplMutex::new(efi::TPL_HIGH_LEVEL, 1_usize, "test_lock");
-            println!("{tpl_mutex:?}");
-            let guard = tpl_mutex.lock();
-            println!("{tpl_mutex:?}");
-            println!("{guard:?}");
-            println!("{guard:}");
+    fn test_tpl_mutex_try_lock() {
+        with_reset_state(|| {
+            let lock = TplMutex::new(efi::TPL_NOTIFY, 42, "test_lock");
+            {
+                let guard1 = lock.try_lock().expect("Failed to acquire lock");
+                assert_eq!(*guard1, 42);
+                let guard2 = lock.try_lock();
+                assert!(guard2.is_none(), "Should not be able to acquire lock while already held");
+            }
+            {
+                let guard3 = lock.try_lock().expect("Failed to acquire lock after release");
+                assert_eq!(*guard3, 42);
+            }
+        });
+    }
+    #[test]
+    fn test_tpl_mutex_debug() {
+        with_reset_state(|| {
+            let lock = TplMutex::new(efi::TPL_NOTIFY, 42, "test_lock");
+            let debug_str = format!("{:?}", lock);
+            assert_eq!(debug_str, "TplMutex { lock_tpl: 10, release_tpl: 4, data: 42 }");
+            let _guard = lock.lock();
+            let debug_str_locked = format!("{:?}", lock);
+            assert_eq!(debug_str_locked, "TplMutex { lock_tpl: 10, data: <locked> }");
+        });
+    }
+
+    #[test]
+    fn test_tpl_mutex_guard_debug_display() {
+        with_reset_state(|| {
+            let lock = TplMutex::new(efi::TPL_NOTIFY, 42, "test_lock");
+            {
+                let guard = lock.lock();
+                let debug_str = format!("{:?}", guard);
+                assert_eq!(debug_str, "42");
+                let display_str = format!("{}", guard);
+                assert_eq!(display_str, "42");
+            }
         });
     }
 }
