@@ -86,7 +86,7 @@ provides access to the locked data. The `TplGuard` structure implements `Deref`
 and `DerefMut`, which allows access to the underlying data:
 
 ```rust,ignore
-use crate::tpl_lock::TplMutex;
+use crate::tpl_mutex::TplMutex;
 use r_efi::efi;
 let tpl_mutex = TplMutex::new(efi::TPL_HIGH_LEVEL, 1_usize, "test_lock");
 
@@ -98,7 +98,7 @@ In addition, the when the `TplGuard` structure returned by `lock()` goes out of
 scope or is dropped, the lock is automatically released:
 
 ```rust,ignore
-use crate::tpl_lock::TplMutex;
+use crate::tpl_mutex::TplMutex;
 use r_efi::efi;
 let tpl_mutex1 = TplMutex::new(efi::TPL_HIGH_LEVEL, 1_usize, "test_lock");
 

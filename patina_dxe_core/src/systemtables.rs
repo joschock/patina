@@ -14,10 +14,10 @@ use alloc::{alloc::Allocator, boxed::Box};
 use patina::{boot_services::BootServices, component::IntoComponent, pi::error_codes::EFI_NOT_AVAILABLE_YET};
 use r_efi::efi;
 
-use crate::{allocator::EFI_RUNTIME_SERVICES_DATA_ALLOCATOR, tpl_lock};
+use crate::{allocator::EFI_RUNTIME_SERVICES_DATA_ALLOCATOR, tpl_mutex};
 
-pub static SYSTEM_TABLE: tpl_lock::TplMutex<Option<EfiSystemTable>> =
-    tpl_lock::TplMutex::new(efi::TPL_NOTIFY, None, "StLock");
+pub static SYSTEM_TABLE: tpl_mutex::TplMutex<Option<EfiSystemTable>> =
+    tpl_mutex::TplMutex::new(efi::TPL_NOTIFY, None, "StLock");
 
 pub struct EfiRuntimeServicesTable {
     runtime_services: Box<efi::RuntimeServices, &'static dyn Allocator>,

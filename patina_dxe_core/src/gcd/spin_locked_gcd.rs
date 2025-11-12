@@ -26,7 +26,7 @@ use r_efi::efi;
 
 use crate::{
     GCD, allocator::DEFAULT_ALLOCATION_STRATEGY, ensure, error, events::EVENT_DB, protocol_db,
-    protocol_db::INVALID_HANDLE, tpl_lock,
+    protocol_db::INVALID_HANDLE, tpl_mutex,
 };
 use patina_internal_cpu::paging::{CacheAttributeValue, PatinaPageTable};
 use patina_paging::{MemoryAttributes, PtError, page_allocator::PageAllocator};
@@ -1794,11 +1794,11 @@ pub type MapChangeCallback = fn(MapChangeType);
 
 /// Implements a spin locked GCD suitable for use as a static global.
 pub struct SpinLockedGcd {
-    memory: tpl_lock::TplMutex<GCD>,
-    io: tpl_lock::TplMutex<IoGCD>,
+    memory: tpl_mutex::TplMutex<GCD>,
+    io: tpl_mutex::TplMutex<IoGCD>,
     memory_change_callback: Option<MapChangeCallback>,
     memory_type_info_table: [EFiMemoryTypeInformation; 17],
-    page_table: tpl_lock::TplMutex<Option<Box<dyn PatinaPageTable>>>,
+    page_table: tpl_mutex::TplMutex<Option<Box<dyn PatinaPageTable>>>,
 }
 
 impl SpinLockedGcd {
@@ -1813,7 +1813,7 @@ impl SpinLockedGcd {
     #[coverage(off)]
     pub const fn new(memory_change_callback: Option<MapChangeCallback>) -> Self {
         Self {
-            memory: tpl_lock::TplMutex::new(
+            memory: tpl_mutex::TplMutex::new(
                 efi::TPL_HIGH_LEVEL,
                 GCD {
                     maximum_address: 0,
@@ -1825,7 +1825,7 @@ impl SpinLockedGcd {
                 },
                 "GcdMemLock",
             ),
-            io: tpl_lock::TplMutex::new(
+            io: tpl_mutex::TplMutex::new(
                 efi::TPL_HIGH_LEVEL,
                 IoGCD { maximum_address: 0, io_blocks: Rbt::new() },
                 "GcdIoLock",
@@ -1850,7 +1850,7 @@ impl SpinLockedGcd {
                 EFiMemoryTypeInformation { memory_type: efi::UNACCEPTED_MEMORY_TYPE, number_of_pages: 0 },
                 EFiMemoryTypeInformation { memory_type: 16 /*EfiMaxMemoryType*/, number_of_pages: 0 },
             ],
-            page_table: tpl_lock::TplMutex::new(efi::TPL_HIGH_LEVEL, None, "GcdPageTableLock"),
+            page_table: tpl_mutex::TplMutex::new(efi::TPL_HIGH_LEVEL, None, "GcdPageTableLock"),
         }
     }
 
