@@ -1,4 +1,4 @@
-use crate::{GicBases, tpl_lock::TplMutex};
+use crate::{GicBases, tpl_mutex::TplMutex};
 use alloc::{boxed::Box, vec, vec::Vec};
 use core::ffi::c_void;
 use patina_internal_cpu::interrupts::{

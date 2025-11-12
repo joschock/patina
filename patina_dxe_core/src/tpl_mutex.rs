@@ -75,7 +75,9 @@ impl<T: ?Sized> TplMutex<T> {
         // access is guaranteed by TPL raising.
         if !unsafe { self.lock.get().read_volatile() } {
             // Safety: see prior comment.
-            unsafe { self.lock.get().write_volatile(true); }
+            unsafe {
+                self.lock.get().write_volatile(true);
+            }
             Some(TplGuard { release_tpl, mutex: self })
         } else {
             restore_tpl(release_tpl);
@@ -95,7 +97,6 @@ impl<T: ?Sized + fmt::Debug> fmt::Debug for TplMutex<T> {
             .and_then(|()| (*guard).fmt(f))
             .and_then(|()| write!(f, " }}")),
             None => write!(f, "TplMutex {{ lock_tpl: {:x?}, data: <locked> }}", self.tpl_lock_level),
-
         }
     }
 }
@@ -117,7 +118,7 @@ impl<'a, T: ?Sized> Deref for TplGuard<'a, T> {
     fn deref(&self) -> &'a T {
         // Safety: data is only accessible through the guard, which guarantees mutual exclusion since no higher TPL can
         // obtain the lock without panic, and no code at equal or lower TPL can interrupt while the lock is held.
-        unsafe {self.mutex.data.get().as_ref().expect("TplMutex data pointer should not be null") }
+        unsafe { self.mutex.data.get().as_ref().expect("TplMutex data pointer should not be null") }
     }
 }
 
@@ -125,7 +126,7 @@ impl<'a, T: ?Sized> DerefMut for TplGuard<'a, T> {
     fn deref_mut(&mut self) -> &'a mut T {
         // Safety: data is only accessible through the guard, which guarantees mutual exclusion since no higher TPL can
         // obtain the lock without panic, and no code at equal or lower TPL can interrupt while the lock is held.
-        unsafe {self.mutex.data.get().as_mut().expect("TplMutex data pointer should not be null") }
+        unsafe { self.mutex.data.get().as_mut().expect("TplMutex data pointer should not be null") }
     }
 }
 
@@ -133,7 +134,9 @@ impl<T: ?Sized> Drop for TplGuard<'_, T> {
     fn drop(&mut self) {
         // Safety: raw pointer on lock is used for volatile semantics; pointer is valid by construction, and exclusive
         // access is guaranteed by TPL raising.
-        unsafe { self.mutex.lock.get().write_volatile(false); }
+        unsafe {
+            self.mutex.lock.get().write_volatile(false);
+        }
         restore_tpl(self.release_tpl);
     }
 }

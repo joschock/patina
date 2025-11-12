@@ -43,7 +43,7 @@ use crate::{
     },
     runtime,
     systemtables::EfiSystemTable,
-    tpl_lock,
+    tpl_mutex,
 };
 
 use efi::Guid;
@@ -348,8 +348,8 @@ impl DxeCoreGlobalImageData {
 unsafe impl Sync for DxeCoreGlobalImageData {}
 unsafe impl Send for DxeCoreGlobalImageData {}
 
-static PRIVATE_IMAGE_DATA: tpl_lock::TplMutex<DxeCoreGlobalImageData> =
-    tpl_lock::TplMutex::new(efi::TPL_NOTIFY, DxeCoreGlobalImageData::new(), "ImageLock");
+static PRIVATE_IMAGE_DATA: tpl_mutex::TplMutex<DxeCoreGlobalImageData> =
+    tpl_mutex::TplMutex::new(efi::TPL_NOTIFY, DxeCoreGlobalImageData::new(), "ImageLock");
 
 // helper routine that returns an empty loaded_image::Protocol struct.
 fn empty_image_info() -> efi::protocols::loaded_image::Protocol {

@@ -33,7 +33,7 @@ use crate::{
     protocol_db::{self, INVALID_HANDLE},
     protocols::PROTOCOL_DB,
     systemtables::EfiSystemTable,
-    tpl_lock,
+    tpl_mutex,
 };
 use patina::pi::{
     dxe_services::{self, GcdMemoryType, MemorySpaceDescriptor},
@@ -262,14 +262,14 @@ pub(crate) fn get_memory_ranges_for_memory_type(memory_type: efi::MemoryType) ->
 
 // The following structure is used to track additional allocators that are created in response to allocation requests
 // that are not satisfied by the static allocators.
-static ALLOCATORS: tpl_lock::TplMutex<AllocatorMap> = AllocatorMap::new();
+static ALLOCATORS: tpl_mutex::TplMutex<AllocatorMap> = AllocatorMap::new();
 struct AllocatorMap {
     map: BTreeMap<efi::MemoryType, &'static UefiAllocator>,
 }
 
 impl AllocatorMap {
-    const fn new() -> tpl_lock::TplMutex<Self> {
-        tpl_lock::TplMutex::new(TPL_HIGH_LEVEL, AllocatorMap { map: BTreeMap::new() }, "AllocatorMapLock")
+    const fn new() -> tpl_mutex::TplMutex<Self> {
+        tpl_mutex::TplMutex::new(TPL_HIGH_LEVEL, AllocatorMap { map: BTreeMap::new() }, "AllocatorMapLock")
     }
 }
 
