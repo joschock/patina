@@ -6,17 +6,15 @@
 //!
 //! SPDX-License-Identifier: Apache-2.0
 //!
-#![allow(unused)]
+
 /// Architecture independent public C EFI Memory Attributes Protocol definition.
-use crate::{dxe_services, protocol_db, protocols::PROTOCOL_DB};
+use crate::{dxe_services, protocols::PROTOCOL_DB};
 use alloc::boxed::Box;
-use core::{
-    ffi::c_void,
-    sync::atomic::{AtomicPtr, AtomicUsize, Ordering},
-};
+use core::ffi::c_void;
 use mu_rust_helpers::function;
-use patina::{base::UEFI_PAGE_MASK, error::EfiError};
+use patina::base::UEFI_PAGE_MASK;
 use r_efi::efi;
+use spin::Once;
 
 #[repr(C)]
 pub struct EfiMemoryAttributesProtocolImpl {
@@ -88,7 +86,7 @@ extern "efiapi" fn set_memory_attributes(
     }
 
     let mut current_base = base_address;
-    let range_end = (base_address + length);
+    let range_end = base_address + length;
     while current_base < range_end {
         let descriptor = match dxe_services::core_get_memory_space_descriptor(current_base as efi::PhysicalAddress) {
             Ok(descriptor) => descriptor,
@@ -122,7 +120,7 @@ extern "efiapi" fn set_memory_attributes(
             // failed, the system is dead, barring a bootloader allocating new memory and attempting to set attributes
             // there, because this API is only used by a bootloader setting memory attributes for the next image it is
             // loading. The expectation is that on a future boot the platform would disable this protocol.
-            Err(status) => return efi::Status::UNSUPPORTED,
+            Err(_) => return efi::Status::UNSUPPORTED,
         };
         current_base = next_base;
     }
@@ -148,7 +146,7 @@ extern "efiapi" fn clear_memory_attributes(
     }
 
     let mut current_base = base_address;
-    let range_end = (base_address + length);
+    let range_end = base_address + length;
     while current_base < range_end {
         let descriptor = match dxe_services::core_get_memory_space_descriptor(current_base as efi::PhysicalAddress) {
             Ok(descriptor) => descriptor,
@@ -182,7 +180,7 @@ extern "efiapi" fn clear_memory_attributes(
             // failed, the system is dead, barring a bootloader allocating new memory and attempting to set attributes
             // there, because this API is only used by a bootloader setting memory attributes for the next image it is
             // loading. The expectation is that on a future boot the platform would disable this protocol.
-            Err(status) => return efi::Status::UNSUPPORTED,
+            Err(_) => return efi::Status::UNSUPPORTED,
         };
         current_base = next_base;
     }
@@ -201,8 +199,24 @@ impl EfiMemoryAttributesProtocolImpl {
     }
 }
 
-static MEMORY_ATTRIBUTES_PROTOCOL_HANDLE: AtomicPtr<c_void> = AtomicPtr::new(core::ptr::null_mut());
-static MEMORY_ATTRIBUTES_PROTOCOL_INTERFACE: AtomicPtr<c_void> = AtomicPtr::new(core::ptr::null_mut());
+struct HandleOnce(Once<(efi::Handle, *mut c_void)>);
+// Safety: HandleOnce uses Once which is Sync, and efi::Handle and *mut c_void are only accessed through immutable
+// references after initialization.
+unsafe impl Sync for HandleOnce {}
+
+impl HandleOnce {
+    fn init(&self, handle: efi::Handle, interface: *mut c_void) {
+        assert!(!self.0.is_completed());
+        self.0.call_once(|| (handle, interface));
+    }
+
+    #[allow(unused)]
+    fn get(&self) -> Option<&(efi::Handle, *mut c_void)> {
+        self.0.get()
+    }
+}
+
+static MEMORY_ATTRIBUTES_PROTOCOL_HANDLE: HandleOnce = HandleOnce(Once::new());
 
 /// This function is called by the DXE Core to install the protocol.
 pub(crate) fn install_memory_attributes_protocol() {
@@ -211,12 +225,9 @@ pub(crate) fn install_memory_attributes_protocol() {
     // Convert the protocol to a raw pointer and store it in to protocol DB
     let interface = Box::into_raw(Box::new(protocol));
     let interface = interface as *mut c_void;
-    MEMORY_ATTRIBUTES_PROTOCOL_INTERFACE.store(interface, Ordering::SeqCst);
 
     match PROTOCOL_DB.install_protocol_interface(None, efi::protocols::memory_attribute::PROTOCOL_GUID, interface) {
-        Ok((handle, _)) => unsafe {
-            MEMORY_ATTRIBUTES_PROTOCOL_HANDLE.store(handle, Ordering::SeqCst);
-        },
+        Ok((handle, _)) => MEMORY_ATTRIBUTES_PROTOCOL_HANDLE.init(handle, interface),
         Err(e) => {
             log::error!("Failed to install MEMORY_ATTRIBUTES_PROTOCOL_GUID: {e:?}");
         }
@@ -226,28 +237,20 @@ pub(crate) fn install_memory_attributes_protocol() {
 #[cfg(feature = "compatibility_mode_allowed")]
 /// This function is called in compatibility mode to uninstall the protocol.
 pub(crate) fn uninstall_memory_attributes_protocol() {
-    unsafe {
-        match (
-            MEMORY_ATTRIBUTES_PROTOCOL_HANDLE.load(Ordering::SeqCst),
-            MEMORY_ATTRIBUTES_PROTOCOL_INTERFACE.load(Ordering::SeqCst),
+    if let Some(&(handle, interface)) = MEMORY_ATTRIBUTES_PROTOCOL_HANDLE.get() {
+        match PROTOCOL_DB.uninstall_protocol_interface(
+            handle,
+            efi::protocols::memory_attribute::PROTOCOL_GUID,
+            interface,
         ) {
-            (handle, interface) if handle != protocol_db::INVALID_HANDLE && !interface.is_null() => {
-                match PROTOCOL_DB.uninstall_protocol_interface(
-                    handle,
-                    efi::protocols::memory_attribute::PROTOCOL_GUID,
-                    interface,
-                ) {
-                    Ok(_) => {
-                        log::info!("uninstalled MEMORY_ATTRIBUTES_PROTOCOL_GUID");
-                    }
-                    Err(e) => {
-                        log::error!("Failed to uninstall MEMORY_ATTRIBUTES_PROTOCOL_GUID: {e:?}");
-                    }
-                }
+            Ok(_) => {
+                log::info!("uninstalled MEMORY_ATTRIBUTES_PROTOCOL_GUID");
             }
-            _ => {
-                log::error!("MEMORY_ATTRIBUTES_PROTOCOL_GUID was not installed");
+            Err(e) => {
+                log::error!("Failed to uninstall MEMORY_ATTRIBUTES_PROTOCOL_GUID: {e:?}");
             }
         }
+    } else {
+        log::error!("MEMORY_ATTRIBUTES_PROTOCOL_GUID was not installed");
     }
 }
