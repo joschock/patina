@@ -88,7 +88,7 @@ impl AArch64InterruptInitializer {
     ///
     /// `gicd_base` must point to the GIC Distributor register space.
     ///
-    /// `gircr_base` must point to the GIC Redistributor register space.
+    /// `gicr_base` must point to the GIC Redistributor register space.
     ///
     /// Caller must guarantee that access to these registers is exclusive to this AArch64InterruptInitializer instance
     ///
