@@ -102,8 +102,8 @@ impl AArch64InterruptInitializer {
         // Convert raw GIC address pointers to appropriate types.
         // Safety: function safety requirements guarantee exclusive access to the GICR registers.
         let (gicd, gicr) = unsafe {
-            let gicd = UniqueMmioPointer::new(NonNull::new(gicd_base as _).unwrap());
-            let gicr = NonNull::new(gicr_base as _).unwrap();
+            let gicd = UniqueMmioPointer::new(NonNull::new(gicd_base as _).ok_or(EfiError::InvalidParameter)?);
+            let gicr = NonNull::new(gicr_base as _).ok_or(EfiError::InvalidParameter)?;
             (gicd, gicr)
         };
 
@@ -121,7 +121,10 @@ impl AArch64InterruptInitializer {
         }
 
         log::info!("Total Redistributors: {}, Current CPU Redistributor Index: {}", r_count, cpu_r_idx);
-        assert!(cpu_r_idx != usize::MAX, "Failed to find redistributor for current cpu");
+        if cpu_r_idx == usize::MAX {
+            log::error!("Failed to find redistributor for current cpu");
+            return Err(EfiError::DeviceError);
+        }
 
         // Initialize the GIC:
         // Enable affinity routing and non-secure group 1 interrupts.
