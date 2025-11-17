@@ -10,6 +10,10 @@ use patina::error::EfiError;
 
 use patina::{read_sysreg, write_sysreg};
 
+// This masks out bits in MPIDR_EL1 that are not part of the affinity fields used to identify a core.
+// See definition of MPIDR_EL1 in the ARM Architecture Reference Manual for details.
+const MPIDR_AFFINITY_MASK: u64 = 0x0000_00ff_00ff_ffff;
+
 // Create basic enum for GIC version
 #[derive(PartialEq)]
 pub enum GicVersion {
@@ -107,7 +111,7 @@ impl AArch64InterruptInitializer {
         let mut cpu_r_idx = usize::MAX;
         let mut r_count = 0;
 
-        let mpidr = read_sysreg!(MPIDR_EL1) & 0x0000_00ff_00ff_ffffu64;
+        let mpidr = read_sysreg!(MPIDR_EL1) & MPIDR_AFFINITY_MASK;
         // Safety: function safety requirements guarantee exclusive access to the GICR registers.
         for (index, redistributor) in unsafe { GicRedistributorIterator::new(gicr, false) }.enumerate() {
             r_count = index + 1;
