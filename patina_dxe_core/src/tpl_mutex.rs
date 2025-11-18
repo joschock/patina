@@ -17,6 +17,7 @@ use core::{
     cell::UnsafeCell,
     fmt,
     ops::{Deref, DerefMut},
+    sync::atomic::{AtomicBool, Ordering},
 };
 
 use r_efi::efi;
@@ -26,7 +27,7 @@ use crate::events::{raise_tpl, restore_tpl};
 /// Used to guard data with a locked MUTEX and TPL level.
 pub struct TplMutex<T: ?Sized> {
     tpl_lock_level: efi::Tpl,
-    lock: UnsafeCell<bool>,
+    lock: AtomicBool,
     name: &'static str,
     data: UnsafeCell<T>,
 }
@@ -45,7 +46,7 @@ unsafe impl<T: ?Sized + Send> Send for TplGuard<'_, T> {}
 impl<T> TplMutex<T> {
     /// Instantiates a new TplMutex with the given TPL level, data object, and name string.
     pub const fn new(tpl_lock_level: efi::Tpl, data: T, name: &'static str) -> Self {
-        Self { tpl_lock_level, lock: UnsafeCell::new(false), data: UnsafeCell::new(data), name }
+        Self { tpl_lock_level, lock: AtomicBool::new(false), data: UnsafeCell::new(data), name }
     }
 }
 
@@ -71,13 +72,7 @@ impl<T: ?Sized> TplMutex<T> {
     /// TPL inversion.
     pub fn try_lock(&self) -> Option<TplGuard<'_, T>> {
         let release_tpl = raise_tpl(self.tpl_lock_level);
-        // Safety: raw pointer on lock is used for volatile semantics; pointer is valid by construction, and exclusive
-        // access is guaranteed by TPL raising.
-        if !unsafe { self.lock.get().read_volatile() } {
-            // Safety: see prior comment.
-            unsafe {
-                self.lock.get().write_volatile(true);
-            }
+        if self.lock.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_ok() {
             Some(TplGuard { release_tpl, mutex: self })
         } else {
             restore_tpl(release_tpl);
@@ -132,11 +127,7 @@ impl<'a, T: ?Sized> DerefMut for TplGuard<'a, T> {
 
 impl<T: ?Sized> Drop for TplGuard<'_, T> {
     fn drop(&mut self) {
-        // Safety: raw pointer on lock is used for volatile semantics; pointer is valid by construction, and exclusive
-        // access is guaranteed by TPL raising.
-        unsafe {
-            self.mutex.lock.get().write_volatile(false);
-        }
+        self.mutex.lock.store(false, Ordering::Release);
         restore_tpl(self.release_tpl);
     }
 }
