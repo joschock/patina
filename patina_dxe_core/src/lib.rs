@@ -437,20 +437,20 @@ impl<P: PlatformInfo> Core<P> {
     }
 
     /// Attempts to set the HOB list for the DXE Core.
-    fn set_hob_list(&self, hob_list: HobList<'static>) -> bool {
-        if self.hob_list.is_completed() {
-            return false;
+    ///
+    /// Returns an `EfiError::AlreadyStarted` if the HOB list has already been set.
+    fn set_hob_list(&self, hob_list: HobList<'static>) -> Result<&HobList<'static>> {
+        match self.hob_list.is_completed() {
+            true => Err(error::EfiError::AlreadyStarted),
+            false => Ok(self.hob_list.call_once(|| hob_list)),
         }
-
-        let _ = self.hob_list.call_once(|| hob_list);
-        true
     }
 
     /// Returns a reference to the HOB list.
     ///
     /// Must not be called until `set_hob_list` has been called successfully.
     fn hob_list(&self) -> &HobList<'static> {
-        self.hob_list.get().expect("HOB list has been initialized.")
+        self.hob_list.get().expect("HOB list should have been initialized already.")
     }
 
     /// Initializes the core with the given configuration, including GCD initialization, enabling allocations.
@@ -491,7 +491,7 @@ impl<P: PlatformInfo> Core<P> {
         // the initial free memory may not be enough to contain the HOB list. We need to relocate the HOBs because
         // the initial HOB list is not in mapped memory as passed from pre-DXE.
         hob_list.relocate_hobs();
-        debug_assert!(self.set_hob_list(hob_list));
+        assert!(self.set_hob_list(hob_list).is_ok());
 
         // Add custom monitor commands to the debugger before initializing so that
         // they are available in the initial breakpoint.
