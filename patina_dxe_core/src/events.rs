@@ -101,19 +101,13 @@ pub extern "efiapi" fn close_event(event: efi::Event) -> efi::Status {
 }
 
 pub extern "efiapi" fn signal_event(event: efi::Event) -> efi::Status {
-    let status = match EVENT_DB.signal_event(event) {
-        Ok(()) => efi::Status::SUCCESS,
-        Err(err) => err.into(),
-    };
-
     //Note: The C-reference implementation of SignalEvent gets an immediate dispatch of
     //pending events as a side effect of the locking implementation calling raise/restore
-    //TPL. The spec doesn't require this; but it's likely that code out there depends
-    //on it. So emulate that here with an artificial raise/restore.
-    let old_tpl = raise_tpl(efi::TPL_HIGH_LEVEL);
-    restore_tpl(old_tpl);
-
-    status
+    //TPL. This will occur when the event lock is dropped at the end of signal_event().
+    match EVENT_DB.signal_event(event) {
+        Ok(()) => efi::Status::SUCCESS,
+        Err(err) => err.into(),
+    }
 }
 
 extern "efiapi" fn wait_for_event(

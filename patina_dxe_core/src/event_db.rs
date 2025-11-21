@@ -675,8 +675,9 @@ impl SpinLockedEventDb {
                 pending_signals.push(PendingSignals::Event(event));
                 Ok(())
             } else {
-                log::warn!("Could not acquire pending signals lock to queue signal.");
-                Err(EfiError::DeviceError)
+                log::error!("Could not acquire pending signals lock to queue signal.");
+                debug_assert!(false, "Could not acquire pending signals lock to queue signal.");
+                Ok(())
             }
         }
     }
