@@ -1515,6 +1515,103 @@ mod tests {
     }
 
     #[test]
+    fn signal_event_under_event_lock_should_use_pending_queue() {
+        with_locked_state(|| {
+            static SPIN_LOCKED_EVENT_DB: SpinLockedEventDb = SpinLockedEventDb::new();
+            let mut events: Vec<efi::Event> = Vec::new();
+            // create some non-grouped events.
+            for _ in 0..10 {
+                events.push(
+                    SPIN_LOCKED_EVENT_DB
+                        .create_event(
+                            efi::EVT_TIMER | efi::EVT_NOTIFY_SIGNAL,
+                            efi::TPL_NOTIFY,
+                            Some(test_notify_function),
+                            None,
+                            None,
+                        )
+                        .unwrap(),
+                );
+            }
+
+            let uuid = Uuid::from_str("aefcf33c-ce02-47b4-89f6-4bacdeda3377").unwrap();
+            let group1 = efi::Guid::from_bytes(uuid.as_bytes());
+            // create some grouped events.
+            let mut grouped_events: Vec<efi::Event> = Vec::new();
+            for _ in 0..10 {
+                grouped_events.push(
+                    SPIN_LOCKED_EVENT_DB
+                        .create_event(
+                            efi::EVT_TIMER | efi::EVT_NOTIFY_SIGNAL,
+                            efi::TPL_NOTIFY,
+                            Some(test_notify_function),
+                            None,
+                            Some(group1),
+                        )
+                        .unwrap(),
+                );
+            }
+
+            let mut guard = SPIN_LOCKED_EVENT_DB.lock();
+            // signal all events while holding the lock.
+            for event in &events {
+                SPIN_LOCKED_EVENT_DB.signal_event(*event).unwrap();
+            }
+
+            //signal the group
+            SPIN_LOCKED_EVENT_DB.signal_group(group1);
+
+            // check ordering of pending_signals and ensure none are marked signaled.
+            for (event, pending_signal) in events.iter().zip(guard.pending_signals.lock().iter()) {
+                if let PendingSignals::Event(pending_event) = pending_signal {
+                    assert_eq!(event, pending_event);
+                    assert!(!guard.is_signaled(*event));
+                } else {
+                    panic!("Unexpected Group in guard.pending_signals");
+                }
+            }
+
+            // last element should be a group signal.
+            if let Some(PendingSignals::Group(pending_group)) = guard.pending_signals.lock().last() {
+                assert_eq!(group1, *pending_group);
+            } else {
+                panic!("group not in guard.pending_signals");
+            }
+
+            // size should be the number of ungrouped events plus one group signal.
+            assert_eq!(guard.pending_signals.lock().len(), events.len() + 1);
+
+            // none of the group signals should be signaled.
+            for event in &grouped_events {
+                assert!(!guard.is_signaled(*event));
+            }
+
+            // none of these should be pending while the lock is held.
+            assert!(guard.pending_notifies.is_empty());
+
+            // drop the lock. This should signal all the events.
+            drop(guard);
+
+            // now all events should be signaled.
+            for event in &events {
+                assert!(SPIN_LOCKED_EVENT_DB.is_signaled(*event));
+            }
+            for event in &grouped_events {
+                assert!(SPIN_LOCKED_EVENT_DB.is_signaled(*event));
+            }
+
+            // check the notify queue ordering. note: grouped events are expected to be notified in reverse creation order.
+            let ordered_events_iter = events.iter().chain(grouped_events.iter().rev());
+
+            let notify_iter = iter::from_fn(|| SPIN_LOCKED_EVENT_DB.consume_next_event_notify(efi::TPL_APPLICATION));
+
+            for (event, notify) in ordered_events_iter.zip(notify_iter.map(|n| n.event)) {
+                assert_eq!(*event, notify);
+            }
+        });
+    }
+
+    #[test]
     fn queue_event_notify_should_queue_event_notify() {
         with_locked_state(|| {
             static SPIN_LOCKED_EVENT_DB: SpinLockedEventDb = SpinLockedEventDb::new();
