@@ -66,6 +66,8 @@
 
 extern crate alloc;
 
+use alloc::boxed::Box;
+
 mod allocator;
 mod component_dispatcher;
 mod config_tables;
@@ -110,7 +112,6 @@ use core::{
     str::FromStr,
 };
 
-use alloc::boxed::Box;
 use gcd::SpinLockedGcd;
 use memory_manager::CoreMemoryManager;
 use mu_rust_helpers::{function, guid::CALLER_ID};
@@ -123,7 +124,7 @@ use patina::{
         measurement::create_performance_measurement,
     },
     pi::{
-        hob::{HobList, get_c_hob_list_size},
+        hob::{HobList, get_pi_hob_list_size},
         protocols::{bds, status_code},
         status_code::{EFI_PROGRESS_CODE, EFI_SOFTWARE_DXE_CORE, EFI_SW_DXE_CORE_PC_HANDOFF_TO_NEXT},
     },
@@ -329,10 +330,11 @@ impl<P: PlatformInfo> Core<P> {
     /// The entry point for the Patina DXE Core.
     pub fn entry_point(&'static self, physical_hob_list: *const c_void) -> ! {
         assert!(self.set_instance(), "DXE Core instance was already set!");
+        assert!(!physical_hob_list.is_null(), "The DXE Core requires a non-null HOB list pointer.");
 
-        self.init_memory(physical_hob_list);
+        let relocated_hob_list = self.init_memory(physical_hob_list);
 
-        if let Err(err) = self.start_dispatcher(physical_hob_list) {
+        if let Err(err) = self.start_dispatcher(relocated_hob_list) {
             log::error!("DXE Core failed to start: {err:?}");
         }
 
@@ -357,7 +359,9 @@ impl<P: PlatformInfo> Core<P> {
     }
 
     /// Initializes the core with the given configuration, including GCD initialization, enabling allocations.
-    fn init_memory(&self, physical_hob_list: *const c_void) {
+    ///
+    /// Returns the relocated HOB list pointer that should be used for all subsequent operations.
+    fn init_memory(&self, physical_hob_list: *const c_void) -> *mut c_void {
         log::info!("DXE Core Crate v{}", env!("CARGO_PKG_VERSION"));
 
         GCD.prioritize_32_bit_memory(P::MemoryInfo::prioritize_32_bit_memory());
@@ -367,10 +371,6 @@ impl<P: PlatformInfo> Core<P> {
 
         // For early debugging, the "no_alloc" feature must be enabled in the debugger crate.
         // patina_debugger::initialize(&mut interrupt_manager);
-
-        if physical_hob_list.is_null() {
-            panic!("HOB list pointer is null!");
-        }
 
         gcd::init_gcd(physical_hob_list);
 
@@ -388,6 +388,20 @@ impl<P: PlatformInfo> Core<P> {
         PROTOCOL_DB.init_protocol_db();
         // Initialize full allocation support.
         allocator::init_memory_support(&hob_list);
+
+        // Relocate the PI Spec HOB list
+        //
+        // SAFETY: physical_hob_list is checked for null when it is accepted at the DXE core entry point.
+        let pi_hob_list_size = unsafe { get_pi_hob_list_size(physical_hob_list) };
+
+        // SAFETY: Creating a slice from the original PI HOB list pointer with the calculated size.
+        let pi_hob_slice = unsafe { core::slice::from_raw_parts(physical_hob_list as *const u8, pi_hob_list_size) };
+
+        // Leak a DXE allocated PI HOB list so it is available throughout the DXE phase.
+        let relocated_hob_list = Box::leak(pi_hob_slice.to_vec().into_boxed_slice()).as_mut_ptr().cast::<c_void>();
+
+        // Relocate the Rust HOB list
+        //
         // we have to relocate HOBs after memory services are initialized as we are going to allocate memory and
         // the initial free memory may not be enough to contain the HOB list. We need to relocate the HOBs because
         // the initial HOB list is not in mapped memory as passed from pre-DXE.
@@ -411,6 +425,8 @@ impl<P: PlatformInfo> Core<P> {
         component_dispatcher.add_service(CoreMemoryManager);
         component_dispatcher
             .add_service(cpu::PerfTimer::with_frequency(P::CpuInfo::perf_timer_frequency().unwrap_or(0)));
+
+        relocated_hob_list
     }
 
     /// Performs a combined dispatch of Patina components and UEFI drivers.
@@ -439,19 +455,7 @@ impl<P: PlatformInfo> Core<P> {
         Ok(())
     }
 
-    /// Returns the length of the HOB list.
-    /// Clippy gets unhappy if we call get_c_hob_list_size directly, because it gets confused, thinking
-    /// get_c_hob_list_size is not marked unsafe, but it is
-    fn get_hob_list_len(hob_list: *const c_void) -> usize {
-        unsafe { get_c_hob_list_size(hob_list) }
-    }
-
-    fn initialize_system_table(&self, physical_hob_list: *const c_void) -> Result<()> {
-        let hob_list_slice = unsafe {
-            core::slice::from_raw_parts(physical_hob_list as *const u8, Self::get_hob_list_len(physical_hob_list))
-        };
-        let relocated_c_hob_list = hob_list_slice.to_vec().into_boxed_slice();
-
+    fn initialize_system_table(&self, physical_hob_list: *mut c_void) -> Result<()> {
         // Instantiate system table.
         systemtables::init_system_table();
 
@@ -479,13 +483,8 @@ impl<P: PlatformInfo> Core<P> {
         let (a, b, c, &[d0, d1, d2, d3, d4, d5, d6, d7]) =
             uuid::Uuid::from_str("7739F24C-93D7-11D4-9A3A-0090273FC14D").expect("Invalid UUID format.").as_fields();
         let hob_list_guid: efi::Guid = efi::Guid::from_fields(a, b, c, d0, d1, &[d2, d3, d4, d5, d6, d7]);
-
-        config_tables::core_install_configuration_table(
-            hob_list_guid,
-            Box::leak(relocated_c_hob_list).as_mut_ptr() as *mut c_void,
-            st,
-        )
-        .expect("Unable to create configuration table due to invalid table entry.");
+        config_tables::core_install_configuration_table(hob_list_guid, physical_hob_list, st)
+            .expect("Unable to create configuration table due to invalid table entry.");
 
         // Install Memory Type Info configuration table.
         allocator::install_memory_type_info_table(st).expect("Unable to create Memory Type Info Table");
@@ -517,7 +516,7 @@ impl<P: PlatformInfo> Core<P> {
     }
 
     /// Starts the core, dispatching all drivers.
-    fn start_dispatcher(&'static self, physical_hob_list: *const c_void) -> Result<()> {
+    fn start_dispatcher(&'static self, physical_hob_list: *mut c_void) -> Result<()> {
         log::info!("Registering platform components");
         self.apply_component_info();
         log::info!("Finished.");
