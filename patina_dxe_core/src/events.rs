@@ -115,7 +115,7 @@ extern "efiapi" fn wait_for_event(
     event_array: *mut efi::Event,
     out_index: *mut usize,
 ) -> efi::Status {
-    if number_of_events == 0 || event_array.is_null() || out_index.is_null() {
+    if number_of_events == 0 || event_array.is_null() {
         return efi::Status::INVALID_PARAMETER;
     }
 
@@ -132,10 +132,12 @@ extern "efiapi" fn wait_for_event(
             match check_event(event) {
                 efi::Status::NOT_READY => (),
                 status => {
-                    // Safety: caller must ensure that out_index is a valid pointer. It is null-checked above.
-                    unsafe {
-                        out_index.write_unaligned(index);
-                    };
+                    // Safety: caller must ensure that out_index is a valid pointer if it is not null. It is null-checked above.
+                    if !out_index.is_null() {
+                        unsafe {
+                            out_index.write_unaligned(index);
+                        };
+                    }
                     return status;
                 }
             }
@@ -782,10 +784,6 @@ mod tests {
 
             // Test null event array
             let status = wait_for_event(1, ptr::null_mut(), &mut index as *mut usize);
-            assert_eq!(status, efi::Status::INVALID_PARAMETER);
-
-            // Test null out_index
-            let status = wait_for_event(1, events.as_ptr() as *mut efi::Event, ptr::null_mut());
             assert_eq!(status, efi::Status::INVALID_PARAMETER);
 
             // Test zero events
