@@ -15,7 +15,7 @@ use r_efi::efi;
 
 use patina::pi::protocols::timer;
 
-use patina_internal_cpu::interrupts;
+use patina_internal_cpu::{cpu::EfiCpu, interrupts};
 
 use crate::{
     event_db::{SpinLockedEventDb, TimerDelay},
@@ -132,7 +132,7 @@ extern "efiapi" fn wait_for_event(
             match check_event(event) {
                 efi::Status::NOT_READY => (),
                 status => {
-                    // Safety: caller must ensure that out_index is a valid pointer if it is not null. It is null-checked above.
+                    // Safety: caller must ensure that out_index is a valid pointer if it is not null.
                     if !out_index.is_null() {
                         unsafe {
                             out_index.write_unaligned(index);
@@ -144,6 +144,13 @@ extern "efiapi" fn wait_for_event(
             // Safety: caller must ensure that event_array is a valid pointer and number_of_events is correct. event_array is null-checked above.
             event_ptr = unsafe { event_ptr.add(1) };
         }
+
+        // EDK2 core signals an idle event here to notify an event group of the "idle" state. The only consumers of that
+        // event are the CPU architectural drivers which use it to enter a low power state until the next interrupt.
+        // Patina implements CPU architectural support as part of the core, so directly call the sleep() method to avoid
+        // exposing the idle event to outside consumers (this event group is not specified in UEFI or PI specs). In the
+        // event that a need arises to expose the idle event to consumers outside of Patina, it can be signaled here.
+        EfiCpu::sleep();
     }
 }
 
