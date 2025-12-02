@@ -319,8 +319,9 @@ pub fn gcd_map_change(map_change_type: gcd::MapChangeType) {
         gcd::MapChangeType::AddMemorySpace
         | gcd::MapChangeType::AllocateMemorySpace
         | gcd::MapChangeType::FreeMemorySpace
-        | gcd::MapChangeType::RemoveMemorySpace => EVENT_DB.signal_group(efi::EVENT_GROUP_MEMORY_MAP_CHANGE),
-        gcd::MapChangeType::SetMemoryAttributes | gcd::MapChangeType::SetMemoryCapabilities => (),
+        | gcd::MapChangeType::RemoveMemorySpace
+        | gcd::MapChangeType::SetMemoryCapabilities => EVENT_DB.signal_group(efi::EVENT_GROUP_MEMORY_MAP_CHANGE),
+        gcd::MapChangeType::SetMemoryAttributes => (),
     }
 }
 
