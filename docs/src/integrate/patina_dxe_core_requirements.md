@@ -323,11 +323,25 @@ platform produces are appropriate for the regions of memory that they describe.
 
 #### 4.3 X64-specific requirements
 
-TODO: X64-specific requirements.
+As described in the general architectural requirements. X64 systems must exclude `CpuDxe`. In addition
+[`MpDxe`](https://github.com/OpenDevicePartnership/patina-edk2/blob/main/PatinaPkg/MpDxe) should be included in the
+platform flash file as it is used to install the MP Services protocol.
 
-TODO: Verbiage for X64 MP Services support copied from previous CPU section above:
-There is an x64 implementation of [`MpDxe`](https://github.com/microsoft/mu_basecore/blob/HEAD/UefiCpuPkg/MpDxe/MpDxe.inf)
-that platforms should add to their flash file for use with the Patina DXE Core if MP services are desired.
+> Note: The [`patina-mtrr`](https://github.com/OpenDevicePartnership/patina-mtrr) repo provides pure-Rust MTRR support
+> for X64 platforms. This can be used indpendently of the Patina DXE Core. It is intended to provide generic MTRR
+> support for Rust-based UEFI environments on X64 platforms.
+
+##### 4.3.1 X64 MM Core and MM Driver Requirements
+
+Due to the [No Traditional SMM](#11-no-traditional-smm) requirement, X64 platforms must ensure that the MM core is of
+module type `MM_CORE_STANDALONE` and all MM drivers are of module type `MM_STANDALONE`. X64 platforms can optionally
+use the MM communication code in the [`patina_mm`](https://github.com/OpenDevicePartnership/patina/tree/main/components/patina_mm)
+crate to facilitate communication between DXE and MM during the DXE phase. However, this component does not provide
+support during runtime. This is because Patina components are currently not supported during runtime. Because of this,
+it is recommended to use the MM communication code produced by a `DXE_RUNTIME_DRIVER` such as
+([`StandaloneMmPkg/Drivers/MmCommunicationDxe/MmCommunicationDxe`](https://github.com/tianocore/edk2/tree/HEAD/StandaloneMmPkg/Drivers/MmCommunicationDxe))
+for C-driver communication support during boot and the [`MmCommunicator`](https://github.com/OpenDevicePartnership/patina/blob/main/components/patina_mm/src/component/communicator.rs)
+component provided in `patina_mm` for MM communication in Patina components.
 
 ### 5. Known Limitations
 
