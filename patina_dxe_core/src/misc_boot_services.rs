@@ -6,24 +6,44 @@
 //!
 //! SPDX-License-Identifier: Apache-2.0
 //!
-use core::{
-    ffi::c_void,
-    slice::from_raw_parts,
-    sync::atomic::{AtomicBool, AtomicPtr, Ordering},
-};
+use core::{ffi::c_void, slice::from_raw_parts, sync::atomic::Ordering};
 use patina::{
     guids,
     pi::{protocols, status_code},
 };
 use patina_internal_cpu::interrupts;
 use r_efi::efi;
+use spin::Once;
 
 use crate::{
     GCD, allocator::terminate_memory_map, events::EVENT_DB, protocols::PROTOCOL_DB, systemtables::SYSTEM_TABLE,
 };
 
-static METRONOME_ARCH_PTR: AtomicPtr<protocols::metronome::Protocol> = AtomicPtr::new(core::ptr::null_mut());
-static WATCHDOG_ARCH_PTR: AtomicPtr<protocols::watchdog::Protocol> = AtomicPtr::new(core::ptr::null_mut());
+struct ArchProtocolPtr<T>(Once<*mut T>);
+
+impl<T> ArchProtocolPtr<T> {
+    const fn new() -> Self {
+        ArchProtocolPtr(Once::new())
+    }
+
+    fn get(&self) -> Option<*mut T> {
+        self.0.get().copied()
+    }
+
+    // Safety: ptr must be a valid pointer to T and init must only be called once.
+    unsafe fn init(&self, ptr: *mut c_void) {
+        assert!(!self.0.is_completed(), "Attempted to set ArchProtocolPtr more than once.");
+        let _ = self.0.call_once(|| ptr as *mut T);
+    }
+}
+
+// Safety: ArchProtocolPtr is Send/Sync because the pointer it wraps is initialized in a thread-safe manner (using
+// `Once`), and the pointer itself is never used to mutate data.
+unsafe impl<T> Send for ArchProtocolPtr<T> {}
+unsafe impl<T> Sync for ArchProtocolPtr<T> {}
+
+static METRONOME_ARCH_PTR: ArchProtocolPtr<protocols::metronome::Protocol> = ArchProtocolPtr::new();
+static WATCHDOG_ARCH_PTR: ArchProtocolPtr<protocols::watchdog::Protocol> = ArchProtocolPtr::new();
 
 // TODO [BEGIN]: LOCAL (TEMP) GUID DEFINITIONS (MOVE LATER)
 
@@ -52,8 +72,9 @@ extern "efiapi" fn calculate_crc32(data: *mut c_void, data_size: usize, crc_32: 
 // Induces a fine-grained stall. Stalls execution on the processor for at least the requested number of microseconds.
 // Execution of the processor is not yielded for the duration of the stall.
 extern "efiapi" fn stall(microseconds: usize) -> efi::Status {
-    let metronome_ptr = METRONOME_ARCH_PTR.load(Ordering::SeqCst);
-    if let Some(metronome) = unsafe { metronome_ptr.as_mut() } {
+    if let Some(metronome_ptr) = METRONOME_ARCH_PTR.get() {
+        // Safety: metronome_ptr is guaranteed to be a valid pointer to the metronome protocol if it is Some.
+        let metronome = unsafe { metronome_ptr.as_mut().unwrap() };
         let ticks_100ns: u128 = (microseconds as u128) * 10;
         let mut ticks = ticks_100ns / metronome.tick_period as u128;
         while ticks > u32::MAX as u128 {
@@ -91,8 +112,9 @@ extern "efiapi" fn set_watchdog_timer(
     _data: *mut efi::Char16,
 ) -> efi::Status {
     const WATCHDOG_TIMER_CALIBRATE_PER_SECOND: u64 = 10000000;
-    let watchdog_ptr = WATCHDOG_ARCH_PTR.load(Ordering::SeqCst);
-    if let Some(watchdog) = unsafe { watchdog_ptr.as_mut() } {
+    if let Some(watchdog_ptr) = WATCHDOG_ARCH_PTR.get() {
+        // Safety: watchdog_ptr is guaranteed to be a valid pointer to the watchdog protocol if it is Some.
+        let watchdog = unsafe { watchdog_ptr.as_mut().unwrap() };
         let timeout = (timeout as u64).saturating_mul(WATCHDOG_TIMER_CALIBRATE_PER_SECOND);
         let status = (watchdog.set_timer_period)(watchdog_ptr, timeout);
         if status.is_error() {
@@ -110,7 +132,10 @@ extern "efiapi" fn set_watchdog_timer(
 extern "efiapi" fn metronome_arch_available(event: efi::Event, _context: *mut c_void) {
     match PROTOCOL_DB.locate_protocol(protocols::metronome::PROTOCOL_GUID) {
         Ok(metronome_arch_ptr) => {
-            METRONOME_ARCH_PTR.store(metronome_arch_ptr as *mut protocols::metronome::Protocol, Ordering::SeqCst);
+            // Safety: metronome_arch_ptr is expected to be a valid pointer to the metronome protocol since it is
+            // associated with the metronome arch guid.
+            assert!(!metronome_arch_ptr.is_null(), "Located metronome protocol pointer is null.");
+            unsafe { METRONOME_ARCH_PTR.init(metronome_arch_ptr) };
             if let Err(status_err) = EVENT_DB.close_event(event) {
                 log::warn!("Could not close event for metronome_arch_available due to error {status_err:?}");
             }
@@ -125,7 +150,10 @@ extern "efiapi" fn metronome_arch_available(event: efi::Event, _context: *mut c_
 extern "efiapi" fn watchdog_arch_available(event: efi::Event, _context: *mut c_void) {
     match PROTOCOL_DB.locate_protocol(protocols::watchdog::PROTOCOL_GUID) {
         Ok(watchdog_arch_ptr) => {
-            WATCHDOG_ARCH_PTR.store(watchdog_arch_ptr as *mut protocols::watchdog::Protocol, Ordering::SeqCst);
+            // Safety: watchdog_arch_ptr is expected to be a valid pointer to the watchdog protocol since it is
+            // associated with the watchdog arch guid.
+            assert!(!watchdog_arch_ptr.is_null(), "Located watchdog protocol pointer is null.");
+            unsafe { WATCHDOG_ARCH_PTR.init(watchdog_arch_ptr) };
             if let Err(status_err) = EVENT_DB.close_event(event) {
                 log::warn!("Could not close event for watchdog_arch_available due to error {status_err:?}");
             }
@@ -135,17 +163,17 @@ extern "efiapi" fn watchdog_arch_available(event: efi::Event, _context: *mut c_v
 }
 
 pub extern "efiapi" fn exit_boot_services(_handle: efi::Handle, map_key: usize) -> efi::Status {
-    static EXIT_BOOT_SERVICES_CALLED: AtomicBool = AtomicBool::new(false);
+    static EXIT_BOOT_SERVICES_CALLED: Once<()> = Once::new();
 
     log::info!("EBS initiated.");
     // Pre-exit boot services and before exit boot services are only signaled once
-    if !EXIT_BOOT_SERVICES_CALLED.load(Ordering::SeqCst) {
+    if !EXIT_BOOT_SERVICES_CALLED.is_completed() {
         EVENT_DB.signal_group(PRE_EBS_GUID);
 
         // Signal the event group before exit boot services
         EVENT_DB.signal_group(efi::EVENT_GROUP_BEFORE_EXIT_BOOT_SERVICES);
 
-        EXIT_BOOT_SERVICES_CALLED.store(true, Ordering::SeqCst);
+        EXIT_BOOT_SERVICES_CALLED.call_once(|| ());
     }
 
     // Disable the timer
