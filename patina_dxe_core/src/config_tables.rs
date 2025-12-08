@@ -10,7 +10,11 @@ pub(crate) mod debug_image_info_table;
 pub(crate) mod memory_attributes_table;
 
 use alloc::{boxed::Box, vec};
-use core::{ffi::c_void, ptr::slice_from_raw_parts_mut};
+use core::{
+    ffi::c_void,
+    ptr::{NonNull, slice_from_raw_parts_mut},
+    slice::from_raw_parts,
+};
 use patina::error::EfiError;
 use r_efi::efi;
 
@@ -36,15 +40,17 @@ extern "efiapi" fn install_configuration_table(table_guid: *mut efi::Guid, table
 
     match core_install_configuration_table(table_guid, table, st) {
         Err(err) => err.into(),
-        Ok(()) => efi::Status::SUCCESS,
+        Ok(_) => efi::Status::SUCCESS,
     }
 }
 
+/// Install a configuration table in the system table, replacing any existing table with the same GUID.
+/// If a table is replaced or deleted, a pointer to the old table is returned.
 pub fn core_install_configuration_table(
     vendor_guid: efi::Guid,
     vendor_table: *mut c_void,
     efi_system_table: &mut EfiSystemTable,
-) -> Result<(), EfiError> {
+) -> Result<Option<NonNull<c_void>>, EfiError> {
     let system_table = efi_system_table.as_mut();
     //if a table is already present, reconstruct it from the pointer and length in the st.
     let old_cfg_table = if system_table.configuration_table.is_null() {
@@ -60,6 +66,7 @@ pub fn core_install_configuration_table(
         Some(ct_slice_box)
     };
 
+    let mut old_vendor_table_ptr = None;
     // construct the new table contents as a vector.
     let new_table = match old_cfg_table {
         Some(cfg_table) => {
@@ -70,6 +77,7 @@ pub fn core_install_configuration_table(
                 // vendor_table is not null; we are adding or modifying an entry.
                 if let Some(entry) = existing_entry {
                     //entry exists, modify it.
+                    old_vendor_table_ptr = NonNull::new(entry.vendor_table);
                     entry.vendor_table = vendor_table;
                 } else {
                     //entry doesn't exist, add it.
@@ -77,8 +85,9 @@ pub fn core_install_configuration_table(
                 }
             } else {
                 //vendor_table is none; we are deleting an entry.
-                if let Some(_entry) = existing_entry {
+                if let Some(entry) = existing_entry {
                     //entry exists, we can delete it
+                    old_vendor_table_ptr = NonNull::new(entry.vendor_table);
                     current_table.retain(|x| x.vendor_guid != vendor_guid);
                 } else {
                     //entry does not exist, we can't delete it. We have to put the original box back
@@ -121,7 +130,28 @@ pub fn core_install_configuration_table(
     //signal the table guid as an event group
     EVENT_DB.signal_group(vendor_guid);
 
-    Ok(())
+    Ok(old_vendor_table_ptr)
+}
+
+/// Returns the pointer to a configuration table for the specified guid, if it exists.
+pub fn get_configuration_table(table_guid: &efi::Guid) -> Option<NonNull<c_void>> {
+    let st_guard = SYSTEM_TABLE.lock();
+    let st = st_guard.as_ref()?;
+
+    let system_table = st.as_ref();
+    if system_table.configuration_table.is_null() || system_table.number_of_table_entries == 0 {
+        return None;
+    }
+
+    // Safety: system table exists, and configuration is non-null, and number_of_table_entries is non-zero.
+    let ct_slice = unsafe { from_raw_parts(system_table.configuration_table, system_table.number_of_table_entries) };
+
+    for entry in ct_slice {
+        if entry.vendor_guid == *table_guid {
+            return NonNull::new(entry.vendor_table);
+        }
+    }
+    None
 }
 
 pub fn init_config_tables_support(bs: &mut efi::BootServices) {

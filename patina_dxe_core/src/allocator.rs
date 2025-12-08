@@ -790,7 +790,7 @@ pub fn terminate_memory_map(map_key: usize) -> Result<(), EfiError> {
 
 pub fn install_memory_type_info_table(system_table: &mut EfiSystemTable) -> Result<(), EfiError> {
     let table_ptr = NonNull::from(GCD.memory_type_info_table()).cast::<c_void>().as_ptr();
-    config_tables::core_install_configuration_table(guids::MEMORY_TYPE_INFORMATION, table_ptr, system_table)
+    config_tables::core_install_configuration_table(guids::MEMORY_TYPE_INFORMATION, table_ptr, system_table).map(|_| ())
 }
 
 fn process_hob_allocations(hob_list: &HobList) {
