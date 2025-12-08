@@ -157,3 +157,60 @@ pub fn get_configuration_table(table_guid: &efi::Guid) -> Option<NonNull<c_void>
 pub fn init_config_tables_support(bs: &mut efi::BootServices) {
     bs.install_configuration_table = install_configuration_table;
 }
+
+#[cfg(test)]
+mod tests {
+    use patina::base::guid;
+
+    use crate::{systemtables::init_system_table, test_support};
+
+    use super::*;
+
+    fn with_locked_state<F: Fn() + std::panic::RefUnwindSafe>(f: F) {
+        test_support::with_global_lock(|| {
+            unsafe {
+                test_support::init_test_gcd(None);
+                test_support::reset_allocators();
+                init_system_table();
+            }
+            f();
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn install_configuration_table_should_install_table() {
+        with_locked_state(|| {
+            let guid: efi::Guid = guid::Guid::from_string("78926ab0-af16-49e4-8e05-115aafbca1df").to_efi_guid();
+            let table = 0x12345678u32 as *mut c_void;
+
+            assert!(get_configuration_table(&guid).is_none());
+
+            assert_eq!(install_configuration_table(&guid as *const _ as *mut _, table), efi::Status::SUCCESS);
+            assert_eq!(get_configuration_table(&guid).unwrap().as_ptr(), table);
+        });
+    }
+
+    #[test]
+    fn delete_config_table_should_return_ptr() {
+        with_locked_state(|| {
+            let guid: efi::Guid = guid::Guid::from_string("78926ab0-af16-49e4-8e05-115aafbca1df").to_efi_guid();
+            let table = 0x12345678u32 as *mut c_void;
+
+            assert_eq!(install_configuration_table(&guid as *const _ as *mut _, table), efi::Status::SUCCESS);
+
+            assert_eq!(get_configuration_table(&guid).unwrap().as_ptr(), table);
+
+            assert_eq!(
+                core_install_configuration_table(
+                    guid,
+                    core::ptr::null_mut(),
+                    &mut *SYSTEM_TABLE.lock().as_mut().unwrap()
+                ),
+                Ok(Some(NonNull::new(table).unwrap()))
+            );
+
+            assert!(get_configuration_table(&guid).is_none());
+        });
+    }
+}
