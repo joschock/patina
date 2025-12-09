@@ -95,9 +95,6 @@ pub fn init_memory_attributes_table_support() {
 // After this point, subsequent runtime memory allocations/deallocations will create new MAT tables
 extern "efiapi" fn core_install_memory_attributes_table_event_wrapper(event: efi::Event, _context: *mut c_void) {
     core_install_memory_attributes_table();
-    // now we want to capture any future runtime memory changes, so we will mark that ReadyToBoot has occurred
-    // and the install callback will be invoked on the next runtime memory allocation
-    POST_RTB.call_once(|| {});
 
     if let Err(status) = EVENT_DB.close_event(event) {
         log::error!("Failed to close MAT ready to boot event with status {status:#X?}. This should be okay.");
@@ -105,37 +102,44 @@ extern "efiapi" fn core_install_memory_attributes_table_event_wrapper(event: efi
 }
 
 pub fn core_install_memory_attributes_table() {
-    if get_configuration_table(&efi::MEMORY_ATTRIBUTES_TABLE_GUID).is_none() {
-        // we need to install an empty configuration table the first time here, because core_install_configuration_table
-        // may allocate runtime memory. Because it actually gets installed we need to allocate one here, it will be
-        // freed below when we install the real MAT. If we don't allocate this on the heap, we may have undefined
-        // behavior with a stack pointer that goes out of scope
-        match core_allocate_pool(efi::BOOT_SERVICES_DATA, size_of::<efi::MemoryAttributesTable>()) {
-            Ok(empty_ptr) => {
-                if let Some(empty_mat) = unsafe { (empty_ptr as *mut efi::MemoryAttributesTable).as_mut() } {
-                    *empty_mat = efi::MemoryAttributesTable {
-                        version: 0,
-                        number_of_entries: 0,
-                        descriptor_size: 0,
-                        reserved: 0,
-                        entry: [],
-                    };
-                    let mut st_guard = systemtables::SYSTEM_TABLE.lock();
-                    let st = st_guard.as_mut().expect("System table support not initialized");
+    if !POST_RTB.is_completed() {
+        if get_configuration_table(&efi::MEMORY_ATTRIBUTES_TABLE_GUID).is_none() {
+            // we need to install an empty configuration table the first time here, because core_install_configuration_table
+            // may allocate runtime memory. Because it actually gets installed we need to allocate one here, it will be
+            // freed below when we install the real MAT. If we don't allocate this on the heap, we may have undefined
+            // behavior with a stack pointer that goes out of scope
+            match core_allocate_pool(efi::BOOT_SERVICES_DATA, size_of::<efi::MemoryAttributesTable>()) {
+                Ok(empty_ptr) => {
+                    if let Some(empty_mat) = unsafe { (empty_ptr as *mut efi::MemoryAttributesTable).as_mut() } {
+                        *empty_mat = efi::MemoryAttributesTable {
+                            version: 0,
+                            number_of_entries: 0,
+                            descriptor_size: 0,
+                            reserved: 0,
+                            entry: [],
+                        };
+                        let mut st_guard = systemtables::SYSTEM_TABLE.lock();
+                        let st = st_guard.as_mut().expect("System table support not initialized");
 
-                    if let Err(status) =
-                        core_install_configuration_table(efi::MEMORY_ATTRIBUTES_TABLE_GUID, empty_ptr, st)
-                    {
-                        log::error!("Failed to create a null MAT table with status {status:#X?}, cannot create MAT");
-                        return;
+                        if let Err(status) =
+                            core_install_configuration_table(efi::MEMORY_ATTRIBUTES_TABLE_GUID, empty_ptr, st)
+                        {
+                            log::error!(
+                                "Failed to create a null MAT table with status {status:#X?}, cannot create MAT"
+                            );
+                            return;
+                        }
                     }
                 }
-            }
-            Err(err) => {
-                log::error!("Failed to allocate memory for a null MAT! Status {err:#X?}");
-                return;
+                Err(err) => {
+                    log::error!("Failed to allocate memory for a null MAT! Status {err:#X?}");
+                    return;
+                }
             }
         }
+        // now we want to capture any future runtime memory changes, so we will mark that ReadyToBoot has occurred
+        // and the install callback will be invoked on the next runtime memory allocation
+        POST_RTB.call_once(|| {});
     }
 
     // get the GCD memory map descriptors and filter out the non-runtime sections
