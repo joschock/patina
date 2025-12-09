@@ -8,7 +8,9 @@
 //!
 extern crate alloc;
 use alloc::vec::Vec;
-use spin::RwLock;
+
+#[cfg(not(test))]
+use spin::Once;
 
 use core::{ffi::c_void, fmt::Debug, mem::size_of, slice};
 
@@ -27,10 +29,10 @@ pub struct MemoryAttributesTable(*mut efi::MemoryAttributesTable);
 
 // this is a flag to indicate that we have passed ReadyToBoot and can install the MAT on the next runtime memory
 // allocation/deallocation.
-
-// `RwLock` is used here (instead of `Once`) to facilitate unit test flows resetting the value. Outside of unit-test,
-// usage is expected to be a single write false->true during boot.
-static POST_RTB: RwLock<bool> = RwLock::new(false);
+#[cfg(not(test))]
+static POST_RTB: Once<()> = Once::new();
+#[cfg(test)]
+static POST_RTB: crate::test_support::TestOnce<()> = crate::test_support::TestOnce::new();
 
 impl MemoryAttributesTable {
     ///
@@ -50,7 +52,7 @@ impl MemoryAttributesTable {
     /// ```
     ///
     pub fn install() {
-        if *POST_RTB.read() {
+        if POST_RTB.is_completed() {
             core_install_memory_attributes_table()
         }
     }
@@ -95,7 +97,7 @@ extern "efiapi" fn core_install_memory_attributes_table_event_wrapper(event: efi
     core_install_memory_attributes_table();
     // now we want to capture any future runtime memory changes, so we will mark that ReadyToBoot has occurred
     // and the install callback will be invoked on the next runtime memory allocation
-    *POST_RTB.write() = true;
+    POST_RTB.call_once(|| {});
 
     if let Err(status) = EVENT_DB.close_event(event) {
         log::error!("Failed to close MAT ready to boot event with status {status:#X?}. This should be okay.");
@@ -247,7 +249,7 @@ mod tests {
 
     fn with_locked_state<F: Fn() + std::panic::RefUnwindSafe>(f: F) {
         test_support::with_global_lock(|| {
-            *POST_RTB.write() = false;
+            POST_RTB.reset();
 
             unsafe {
                 test_support::init_test_gcd(None);
@@ -256,7 +258,7 @@ mod tests {
             }
             f();
 
-            *POST_RTB.write() = false;
+            POST_RTB.reset();
         })
         .unwrap();
     }
@@ -321,13 +323,13 @@ mod tests {
             let dummy_event: efi::Event = core::ptr::null_mut();
 
             // Ensure POST_RTB is false before the event
-            assert!(!*POST_RTB.read());
+            assert!(!POST_RTB.is_completed());
 
             // Call the event wrapper
             core_install_memory_attributes_table_event_wrapper(dummy_event, core::ptr::null_mut());
 
             // Check if POST_RTB is set after the event
-            assert!(*POST_RTB.read());
+            assert!(POST_RTB.is_completed());
 
             // Check if MEMORY_ATTRIBUTES_TABLE is set after installation
             let mat_ptr = get_configuration_table(&efi::MEMORY_ATTRIBUTES_TABLE_GUID).unwrap();
