@@ -9,13 +9,14 @@
 extern crate alloc;
 use alloc::{boxed::Box, vec, vec::Vec};
 use patina::base::UEFI_PAGE_SIZE;
+use spin::RwLock;
 
 use core::{
     ffi::c_void,
     fmt::Debug,
     mem::size_of,
     ptr,
-    sync::atomic::{AtomicPtr, AtomicU64, Ordering},
+    sync::atomic::{AtomicUsize, Ordering},
 };
 
 use crate::{
@@ -26,7 +27,7 @@ use patina::pi::dxe_services::GcdMemoryType;
 
 use r_efi::efi;
 
-// to be sent upstream to r_efi
+// TODO: (Issue #490) to be sent upstream to r_efi.
 
 /// GUID for the EFI_DEBUG_IMAGE_INFO_TABLE per section 18.4.3 of UEFI Spec 2.11
 pub const EFI_DEBUG_IMAGE_INFO_TABLE_GUID: efi::Guid =
@@ -102,12 +103,19 @@ struct DebugImageInfoTableMetadata<'a> {
     table: &'a mut DebugImageInfoTableHeader,
     slice: Box<[EfiDebugImageInfo]>,
 }
+// Safety: This structure is only accessed under a lock and the data it points to is only modified
+// under that same lock, so it is safe to send and share between threads.
+unsafe impl Sync for DebugImageInfoTableMetadata<'_> {}
+// Safety: See Sync impl above.
+unsafe impl Send for DebugImageInfoTableMetadata<'_> {}
 
-static METADATA_TABLE: AtomicPtr<DebugImageInfoTableMetadata> = AtomicPtr::new(core::ptr::null_mut());
+static METADATA_TABLE: RwLock<Option<DebugImageInfoTableMetadata>> = RwLock::new(None);
 
 const ALIGNMENT_SHIFT_4MB: usize = 22;
 
-static DBG_SYSTEM_TABLE_POINTER_ADDRESS: AtomicU64 = AtomicU64::new(0);
+// AtomicUsize is used here instead of `Once` to ensure that the address can be observed by the debugger in a different context
+// and is not somehow hidden by optimizations.
+static DBG_SYSTEM_TABLE_POINTER_ADDRESS: AtomicUsize = AtomicUsize::new(0);
 
 /// Initializes the EFI_DEBUG_IMAGE_INFO_TABLE_GUID configuration table in the UEFI system table with an empty table.
 pub(crate) fn initialize_debug_image_info_table(system_table: &mut EfiSystemTable) {
@@ -132,7 +140,7 @@ pub(crate) fn initialize_debug_image_info_table(system_table: &mut EfiSystemTabl
         table: unsafe { &mut *table_ptr.cast::<DebugImageInfoTableHeader>() },
         slice: initial_table,
     });
-    METADATA_TABLE.store(Box::into_raw(table), Ordering::SeqCst);
+    *METADATA_TABLE.write() = Some(*table);
 
     // Now create the EFI_SYSTEM_TABLE_POINTER structure
     let system_table_pointer = system_table.system_table() as *const _ as u64;
@@ -170,7 +178,7 @@ pub(crate) fn initialize_debug_image_info_table(system_table: &mut EfiSystemTabl
     }
 
     // Set the system table address for the debugger.
-    DBG_SYSTEM_TABLE_POINTER_ADDRESS.store(address as u64, Ordering::Relaxed);
+    DBG_SYSTEM_TABLE_POINTER_ADDRESS.store(address as usize, Ordering::Relaxed);
 
     patina_debugger::add_monitor_command("system_table_ptr", "Prints the system table pointer", |_, out| {
         let address = DBG_SYSTEM_TABLE_POINTER_ADDRESS.load(Ordering::Relaxed);
@@ -184,21 +192,18 @@ pub(crate) fn core_new_debug_image_info_entry(
     loaded_image_protocol_instance: *const efi::protocols::loaded_image::Protocol,
     image_handle: efi::Handle,
 ) {
-    // This is a very funny check for null because it is working around an LLVM bug where checking is_null() or variations
-    // of that on a load of an atomic pointer causes improper code generation and LLVM to crash. So, this check is a workaround
-    // to check if the pointer is in the first page of memory, which is a valid check for null in this case, as we mark
-    // that entire page as invalid. LLVM issue: https://github.com/llvm/llvm-project/issues/137152.
-    let metadata_table = METADATA_TABLE.load(Ordering::SeqCst);
-    if metadata_table < UEFI_PAGE_SIZE as *mut DebugImageInfoTableMetadata {
-        log::error!("EFI_DEBUG_IMAGE_INFO_TABLE_GUID table not initialized");
-        return;
-    }
+    let mut metadata_table_guard = METADATA_TABLE.write();
 
-    // SAFETY: This is safe because we check that the table is initialized above
-    let metadata_table = unsafe { &mut *(metadata_table) };
+    let metadata_table = match metadata_table_guard.as_mut() {
+        Some(table) => table,
+        None => {
+            log::error!("EFI_DEBUG_IMAGE_INFO_TABLE_GUID table not initialized");
+            return;
+        }
+    };
 
     // per UEFI spec, need to mark the table is being updated and preserve the modified bit if set
-    // SAFETY: This is safe because we are accessing the table header and we ensure that it is initialized
+    // SAFETY: This is safe because we are accessing the table header under a lock, and we ensure that it is initialized in initialize_debug_image_info_table.
     let update_status = unsafe { metadata_table.table.get_update_status() };
     unsafe {
         metadata_table
@@ -246,21 +251,17 @@ pub(crate) fn core_new_debug_image_info_entry(
 
 /// This function is called on image unload to remove an entry from the EFI_DEBUG_IMAGE_INFO_TABLE_GUID table.
 pub(crate) fn core_remove_debug_image_info_entry(image_handle: efi::Handle) {
-    // This is a very funny check for null because it is working around an LLVM bug where checking is_null() or variations
-    // of that on a load of an atomic pointer causes improper code generation and LLVM to crash. So, this check is a workaround
-    // to check if the pointer is in the first page of memory, which is a valid check for null in this case, as we mark
-    // that entire page as invalid. LLVM issue: https://github.com/llvm/llvm-project/issues/137152.
-    let metadata_table = METADATA_TABLE.load(Ordering::SeqCst);
-    if metadata_table < UEFI_PAGE_SIZE as *mut DebugImageInfoTableMetadata {
-        log::error!("EFI_DEBUG_IMAGE_INFO_TABLE_GUID table not initialized");
-        return;
-    }
-
-    // SAFETY: This is safe because we check that the table is initialized above
-    let metadata_table = unsafe { &mut *(metadata_table) };
+    let mut metadata_table_guard = METADATA_TABLE.write();
+    let metadata_table = match metadata_table_guard.as_mut() {
+        Some(table) => table,
+        None => {
+            log::error!("EFI_DEBUG_IMAGE_INFO_TABLE_GUID table not initialized");
+            return;
+        }
+    };
 
     // per UEFI spec, need to mark the table is being updated and preserve the modified bit if set
-    // SAFETY: This is safe because we are accessing the table header and we ensure that it is initialized
+    // SAFETY: This is safe because we are accessing the table header under a lock, and we ensure that it is initialized in initialize_debug_image_info_table.
     let update_status = unsafe { metadata_table.table.get_update_status() };
     unsafe {
         metadata_table
