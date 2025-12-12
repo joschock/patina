@@ -11,13 +11,7 @@ use alloc::{boxed::Box, vec, vec::Vec};
 use patina::base::UEFI_PAGE_SIZE;
 use spin::RwLock;
 
-use core::{
-    ffi::c_void,
-    fmt::Debug,
-    mem::size_of,
-    ptr,
-    sync::atomic::{AtomicUsize, Ordering},
-};
+use core::{ffi::c_void, fmt::Debug, mem::size_of, ptr};
 
 use crate::{
     GCD, config_tables::core_install_configuration_table, gcd::AllocateType, protocol_db, systemtables::EfiSystemTable,
@@ -99,6 +93,7 @@ const IMAGE_INFO_TABLE_SIZE: usize = 128; // initial size of the table
 /// Metadata structure for the DebugImageInfoTable, which contains the actual table and its size. It is only used
 /// internally to manage the table and is not part of the UEFI spec.
 struct DebugImageInfoTableMetadata<'a> {
+    dbg_system_table_pointer_address: efi::PhysicalAddress,
     actual_table_size: u32,
     table: &'a mut DebugImageInfoTableHeader,
     slice: Box<[EfiDebugImageInfo]>,
@@ -112,10 +107,6 @@ unsafe impl Send for DebugImageInfoTableMetadata<'_> {}
 static METADATA_TABLE: RwLock<Option<DebugImageInfoTableMetadata>> = RwLock::new(None);
 
 const ALIGNMENT_SHIFT_4MB: usize = 22;
-
-// AtomicUsize is used here instead of `Once` to ensure that the address can be observed by the debugger in a different context
-// and is not somehow hidden by optimizations.
-static DBG_SYSTEM_TABLE_POINTER_ADDRESS: AtomicUsize = AtomicUsize::new(0);
 
 /// Initializes the EFI_DEBUG_IMAGE_INFO_TABLE_GUID configuration table in the UEFI system table with an empty table.
 pub(crate) fn initialize_debug_image_info_table(system_table: &mut EfiSystemTable) {
@@ -136,6 +127,7 @@ pub(crate) fn initialize_debug_image_info_table(system_table: &mut EfiSystemTabl
 
     // SAFETY: This is safe because we just allocated the table and we are going to use it immediately
     let table = Box::new(DebugImageInfoTableMetadata {
+        dbg_system_table_pointer_address: 0,
         actual_table_size: IMAGE_INFO_TABLE_SIZE as u32,
         table: unsafe { &mut *table_ptr.cast::<DebugImageInfoTableHeader>() },
         slice: initial_table,
@@ -178,10 +170,12 @@ pub(crate) fn initialize_debug_image_info_table(system_table: &mut EfiSystemTabl
     }
 
     // Set the system table address for the debugger.
-    DBG_SYSTEM_TABLE_POINTER_ADDRESS.store(address, Ordering::Relaxed);
+    METADATA_TABLE.write().as_mut().expect("METADATA_TABLE initialized above").dbg_system_table_pointer_address =
+        address as efi::PhysicalAddress;
 
     patina_debugger::add_monitor_command("system_table_ptr", "Prints the system table pointer", |_, out| {
-        let address = DBG_SYSTEM_TABLE_POINTER_ADDRESS.load(Ordering::Relaxed);
+        let address =
+            METADATA_TABLE.read().as_ref().expect("METADATA_TABLE initialized above").dbg_system_table_pointer_address;
         let _ = write!(out, "{address:x}");
     });
 }
@@ -329,7 +323,6 @@ mod tests {
     fn with_locked_state<F: Fn() + std::panic::RefUnwindSafe>(f: F) {
         test_support::with_global_lock(|| {
             METADATA_TABLE.write().take();
-            DBG_SYSTEM_TABLE_POINTER_ADDRESS.store(0, Ordering::Relaxed);
             unsafe {
                 test_support::init_test_gcd(None);
                 init_system_table();
@@ -337,7 +330,6 @@ mod tests {
             f();
 
             METADATA_TABLE.write().take();
-            DBG_SYSTEM_TABLE_POINTER_ADDRESS.store(0, Ordering::Relaxed);
         })
         .unwrap();
     }
@@ -348,8 +340,8 @@ mod tests {
             initialize_debug_image_info_table(SYSTEM_TABLE.lock().as_mut().unwrap());
 
             assert!(METADATA_TABLE.read().as_ref().is_some());
+            assert!(METADATA_TABLE.read().as_ref().unwrap().dbg_system_table_pointer_address != 0);
             assert!(get_configuration_table(&EFI_DEBUG_IMAGE_INFO_TABLE_GUID).is_some());
-            assert!(DBG_SYSTEM_TABLE_POINTER_ADDRESS.load(Ordering::Relaxed) != 0);
         });
     }
 
