@@ -178,7 +178,7 @@ pub(crate) fn initialize_debug_image_info_table(system_table: &mut EfiSystemTabl
     }
 
     // Set the system table address for the debugger.
-    DBG_SYSTEM_TABLE_POINTER_ADDRESS.store(address as usize, Ordering::Relaxed);
+    DBG_SYSTEM_TABLE_POINTER_ADDRESS.store(address, Ordering::Relaxed);
 
     patina_debugger::add_monitor_command("system_table_ptr", "Prints the system table pointer", |_, out| {
         let address = DBG_SYSTEM_TABLE_POINTER_ADDRESS.load(Ordering::Relaxed);
@@ -313,4 +313,102 @@ pub(crate) fn core_remove_debug_image_info_entry(image_handle: efi::Handle) {
                 | DebugImageInfoTableHeader::EFI_DEBUG_IMAGE_INFO_TABLE_MODIFIED,
         )
     };
+}
+
+#[cfg(test)]
+mod tests {
+
+    use crate::{
+        config_tables::get_configuration_table,
+        systemtables::{SYSTEM_TABLE, init_system_table},
+        test_support,
+    };
+
+    use super::*;
+
+    fn with_locked_state<F: Fn() + std::panic::RefUnwindSafe>(f: F) {
+        test_support::with_global_lock(|| {
+            METADATA_TABLE.write().take();
+            DBG_SYSTEM_TABLE_POINTER_ADDRESS.store(0, Ordering::Relaxed);
+            unsafe {
+                test_support::init_test_gcd(None);
+                init_system_table();
+            }
+            f();
+
+            METADATA_TABLE.write().take();
+            DBG_SYSTEM_TABLE_POINTER_ADDRESS.store(0, Ordering::Relaxed);
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn initialize_debug_image_info_table_should_init_table() {
+        with_locked_state(|| {
+            initialize_debug_image_info_table(SYSTEM_TABLE.lock().as_mut().unwrap());
+
+            assert!(METADATA_TABLE.read().as_ref().is_some());
+            assert!(get_configuration_table(&EFI_DEBUG_IMAGE_INFO_TABLE_GUID).is_some());
+            assert!(DBG_SYSTEM_TABLE_POINTER_ADDRESS.load(Ordering::Relaxed) != 0);
+        });
+    }
+
+    #[test]
+    fn add_image_info_should_update_table() {
+        with_locked_state(|| {
+            initialize_debug_image_info_table(SYSTEM_TABLE.lock().as_mut().unwrap());
+
+            core_new_debug_image_info_entry(
+                EfiDebugImageInfoNormal::EFI_DEBUG_IMAGE_INFO_TYPE_NORMAL,
+                core::ptr::null(),
+                0x1234 as efi::Handle,
+            );
+            core_new_debug_image_info_entry(
+                EfiDebugImageInfoNormal::EFI_DEBUG_IMAGE_INFO_TYPE_NORMAL,
+                core::ptr::null(),
+                0x5678 as efi::Handle,
+            );
+
+            let metadata_table = METADATA_TABLE.read();
+            let metadata_table = metadata_table.as_ref().unwrap();
+
+            assert_eq!(metadata_table.table.table_size, 2);
+
+            // SAFETY: This is safe because we just added an entry
+            let debug_image_info = unsafe { &*metadata_table.slice[0].normal_image };
+            assert_eq!(debug_image_info.image_handle, 0x1234 as efi::Handle);
+
+            let debug_image_info = unsafe { &*metadata_table.slice[1].normal_image };
+            assert_eq!(debug_image_info.image_handle, 0x5678 as efi::Handle);
+        });
+    }
+
+    #[test]
+    fn remove_image_info_should_update_table() {
+        with_locked_state(|| {
+            initialize_debug_image_info_table(SYSTEM_TABLE.lock().as_mut().unwrap());
+
+            core_new_debug_image_info_entry(
+                EfiDebugImageInfoNormal::EFI_DEBUG_IMAGE_INFO_TYPE_NORMAL,
+                core::ptr::null(),
+                0x1234 as efi::Handle,
+            );
+            core_new_debug_image_info_entry(
+                EfiDebugImageInfoNormal::EFI_DEBUG_IMAGE_INFO_TYPE_NORMAL,
+                core::ptr::null(),
+                0x5678 as efi::Handle,
+            );
+
+            core_remove_debug_image_info_entry(0x1234 as efi::Handle);
+
+            let metadata_table = METADATA_TABLE.read();
+            let metadata_table = metadata_table.as_ref().unwrap();
+
+            assert_eq!(metadata_table.table.table_size, 1);
+
+            // SAFETY: This is safe because we just added an entry
+            let debug_image_info = unsafe { &*metadata_table.slice[0].normal_image };
+            assert_eq!(debug_image_info.image_handle, 0x5678 as efi::Handle);
+        });
+    }
 }
