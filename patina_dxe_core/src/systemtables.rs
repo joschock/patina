@@ -635,7 +635,7 @@ impl EfiSystemTable {
     }
 
     #[allow(dead_code)]
-    pub fn boot_services(&self) -> &efi::BootServices {
+    pub fn boot_services(&self) -> &'static efi::BootServices {
         unsafe { self.system_table.boot_services.as_ref().expect("BootServices uninitialized") }
     }
 
@@ -645,7 +645,7 @@ impl EfiSystemTable {
     }
 
     #[allow(dead_code)]
-    pub fn runtime_services(&self) -> &efi::RuntimeServices {
+    pub fn runtime_services(&self) -> &'static efi::RuntimeServices {
         unsafe { self.system_table.runtime_services.as_ref().expect("RuntimeServices uninitialized") }
     }
 

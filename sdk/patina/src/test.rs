@@ -690,7 +690,7 @@ mod tests {
         bs.create_event = noop_create_event;
         bs.create_event_ex = noop_create_event_ex;
 
-        storage.set_boot_services(StandardBootServices::new(&bs));
+        storage.set_boot_services(StandardBootServices::new(Box::leak(Box::new(bs))));
 
         // TEST_CASE3 is designed to fail.
         let _ = test_runner.run_tests(Box::leak(Box::new([TEST_CASE3])), &mut storage);
@@ -740,7 +740,7 @@ mod tests {
         bs.create_event_ex = noop_create_event_ex;
         bs.set_timer = noop_set_timer;
 
-        storage.set_boot_services(StandardBootServices::new(&bs));
+        storage.set_boot_services(StandardBootServices::new(Box::leak(Box::new(bs))));
 
         // Failure tests
         assert!(test_runner.run_tests(Box::leak(Box::new([TEST_CASE3, TEST_CASE4, TEST_CASE5])), &mut storage).is_ok());
