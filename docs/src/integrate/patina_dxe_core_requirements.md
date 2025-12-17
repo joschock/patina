@@ -352,4 +352,4 @@ added for in the future.
 
 Presently a hard stack size limitation of 64KB applies to synchronous exceptions on AArch64 platforms. This means, for
 example, that platform panic handlers should not make large allocations on the stack. The following issue tracks this:
-https://github.com/OpenDevicePartnership/patina/issues/781
+[781](https://github.com/OpenDevicePartnership/patina/issues/781)
