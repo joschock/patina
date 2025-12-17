@@ -95,9 +95,9 @@ not. It will also validate that AArch64 DXE_RUNTIME_DRIVERs have a multiple of 6
 
 > **Guidance:**
 > All C based drivers must be compiled with a linker flag that enforces a multiple of 4 KB section alignment.
-> For MSVC, this linker flag is `/ALIGN:0x1000` for GCC/CLANG, the flag is `-z common-page-size=0x1000`. It is
-> recommended to use 4 KB for everything except for AArch64 DXE_RUNTIME_DRIVERs which should use 64 KB i.e.,
-> `/ALIGN:0x10000` for MSVC and `-z common-page-size=0x10000` for GCC/CLANG.
+> For MSVC/CLANGPDB, this linker flag is `/ALIGN:0x1000` for GCC/CLANGDWARF, the flag is `-z common-page-size=0x1000`.
+> It is recommended to use 4 KB for everything except for AArch64 DXE_RUNTIME_DRIVERs which should use 64 KB i.e.,
+> `/ALIGN:0x10000` for MSVC/CLANGPDB and `-z common-page-size=0x10000` for GCC/CLANGDWARF.
 
 ### 2. Hand Off Block (HOB) Requirements
 
@@ -287,10 +287,10 @@ guidance on MP Service enabling for specific architectures).
 
 This section details Patina requirements specific to the AArch64 architecture.
 
-##### 4.2.1 Aarch64 Generic Interrupt Controller (GIC)
+##### 4.2.1 AArch64 Generic Interrupt Controller (GIC)
 
 On AArch64 systems, when Patina assumes ownership of `CpuDxe` it also encompasses the functionality provided by the
-`ArmGicDxe` driver which configures the Aarch64 GIC. This is because GIC support is a prerequisite for `CpuDxe` to
+`ArmGicDxe` driver which configures the AArch64 GIC. This is because GIC support is a prerequisite for `CpuDxe` to
 handle interrupts correctly. As such, AArch64 platforms also should not include the `ArmGicDxe` driver.
 
 In addition, different AArch64 platforms can place the GIC register set at different locations in the system memory map.
@@ -301,18 +301,9 @@ that is part of core configuration.
 > AArch64 platforms should not use the `ArmGicDxe` driver and must supply the base addresses of the GIC in the `CpuInfo`
 > structure.
 
-##### 4.2.2 Aarch64 MP Services support
+##### 4.2.2 AArch64 Memory Caching Attribute Requirements for Device Memory
 
-AArch64 already has an implementation of MP Services independent from `CpuDxe`, in the [`ArmPsciMpServicesDxe`](https://github.com/tianocore/edk2/tree/master/ArmPkg/Drivers/ArmPsciMpServicesDxe)
-driver.
-
-> **Guidance:**
-> Use the [`ArmPsciMpServicesDxe`](https://github.com/tianocore/edk2/tree/master/ArmPkg/Drivers/ArmPsciMpServicesDxe)
-> driver if your platform requires MP Services support.
-
-##### 4.2.3 Aarch64 Memory Caching Attribute Requirements for Device Memory
-
-AAarch64 brings with it specific architectural requirements around the caching attributes for MMIO peripheral memory.
+AArch64 brings with it specific architectural requirements around the caching attributes for MMIO peripheral memory.
 For example, marking a region as "Device" may activate alignment checks on memory access to that region, or not marking
 a peripheral MMIO region as Device may allow speculative execution to that region. Since Patina will configure the cache
 attributes of the memory map at startup (rather than, for example, relying on the paging structures that were set up
@@ -350,7 +341,7 @@ component provided in `patina_mm` for MM communication in Patina components.
 This section details requirements Patina currently has due to limitations in implementation, but that support will be
 added for in the future.
 
-#### 5.1 Synchronous Exception Stack Size limitation on Aarch64 Platforms
+#### 5.1 Synchronous Exception Stack Size limitation on AArch64 Platforms
 
 Presently a hard stack size limitation of 64KB applies to synchronous exceptions on AArch64 platforms. This means, for
 example, that platform panic handlers should not make large allocations on the stack. The following issue tracks this:
