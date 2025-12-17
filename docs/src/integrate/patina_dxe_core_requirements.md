@@ -95,10 +95,9 @@ not. It will also validate that AArch64 DXE_RUNTIME_DRIVERs have a multiple of 6
 
 > **Guidance:**
 > All C based drivers must be compiled with a linker flag that enforces a multiple of 4 KB section alignment.
-> For MSVC, this linker flag is `/ALIGN:0x1000` for GCC/CLANG, the flag is `-z common-page-size=0x1000`. This section
-> allows for multiples of 4 KB or 64 KB, depending on driver, but unless a specific use case dictates greater section
-> alignment, then it is recommended to use 4 KB for everything except for AArch64 DXE_RUNTIME_DRIVERs, which should use
-> 64 KB, e.g. `/ALIGN:0x10000` for MSVC and `-z common-page-size=0x10000` for GCC/CLANG.
+> For MSVC, this linker flag is `/ALIGN:0x1000` for GCC/CLANG, the flag is `-z common-page-size=0x1000`. It is
+> recommended to use 4 KB for everything except for AArch64 DXE_RUNTIME_DRIVERs which should use 64 KB i.e.,
+> `/ALIGN:0x10000` for MSVC and `-z common-page-size=0x10000` for GCC/CLANG.
 
 ### 2. Hand Off Block (HOB) Requirements
 
@@ -281,7 +280,8 @@ guidance on MP Service enabling for specific architectures).
 
 > **Guidance:**
 > Platforms must not include `CpuDxe` in their platforms and instead use CPU services from Patina DXE Core and MP
-> Services from a separate C based driver.
+> Services from a separate C based driver such as [`MpDxe`](https://github.com/OpenDevicePartnership/patina-edk2/blob/main/PatinaPkg/MpDxe)
+> for X64 systems or [`ArmPsciMpServicesDxe`](https://github.com/tianocore/edk2/tree/master/ArmPkg/Drivers/ArmPsciMpServicesDxe).
 
 #### 4.2 AArch64-specific requirements
 
@@ -303,10 +303,12 @@ that is part of core configuration.
 
 ##### 4.2.2 Aarch64 MP Services support
 
-AArch64 already has an implementation of MP Services independent from `CpuDxe`, in the `ArmPsciMpServicesDxe` driver.
+AArch64 already has an implementation of MP Services independent from `CpuDxe`, in the [`ArmPsciMpServicesDxe`](https://github.com/tianocore/edk2/tree/master/ArmPkg/Drivers/ArmPsciMpServicesDxe)
+driver.
 
 > **Guidance:**
-> Use the `ArmPsciMpServicesDxe` driver if your platform requires MP Services support.
+> Use the [`ArmPsciMpServicesDxe`](https://github.com/tianocore/edk2/tree/master/ArmPkg/Drivers/ArmPsciMpServicesDxe)
+> driver if your platform requires MP Services support.
 
 ##### 4.2.3 Aarch64 Memory Caching Attribute Requirements for Device Memory
 
