@@ -18,7 +18,7 @@ use patina_ffs::volume::VolumeRef;
 use patina::pi::dxe_services;
 use r_efi::efi;
 
-use crate::{Core, GCD, PlatformInfo, allocator::core_allocate_pool, config_tables, gcd, systemtables::EfiSystemTable};
+use crate::{Core, GCD, PlatformInfo, allocator::core_allocate_pool, config_tables, gcd, systemtables::EfiSystemTableOld};
 
 extern "efiapi" fn add_memory_space(
     gcd_memory_type: dxe_services::GcdMemoryType,
@@ -364,7 +364,7 @@ extern "efiapi" fn get_io_space_map(
 
 impl<P: PlatformInfo> Core<P> {
     /// Initializes and installs the DXE Services table into the provided system table.
-    pub(crate) fn install_dxe_services_table(&self, system_table: &mut EfiSystemTable) {
+    pub(crate) fn install_dxe_services_table(&self, system_table: &mut EfiSystemTableOld) {
         let mut dxe_services_system_table = dxe_services::DxeServicesTable {
             header: efi::TableHeader {
                 signature: efi::BOOT_SERVICES_SIGNATURE,

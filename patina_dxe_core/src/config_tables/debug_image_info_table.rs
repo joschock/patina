@@ -14,7 +14,7 @@ use spin::RwLock;
 use core::{ffi::c_void, fmt::Debug, mem::size_of, ptr};
 
 use crate::{
-    GCD, config_tables::core_install_configuration_table, gcd::AllocateType, protocol_db, systemtables::EfiSystemTable,
+    GCD, config_tables::core_install_configuration_table, gcd::AllocateType, protocol_db, systemtables::EfiSystemTableOld,
 };
 
 use patina::pi::dxe_services::GcdMemoryType;
@@ -109,7 +109,7 @@ static METADATA_TABLE: RwLock<Option<DebugImageInfoTableMetadata>> = RwLock::new
 const ALIGNMENT_SHIFT_4MB: usize = 22;
 
 /// Initializes the EFI_DEBUG_IMAGE_INFO_TABLE_GUID configuration table in the UEFI system table with an empty table.
-pub(crate) fn initialize_debug_image_info_table(system_table: &mut EfiSystemTable) {
+pub(crate) fn initialize_debug_image_info_table(system_table: &mut EfiSystemTableOld) {
     let initial_table =
         vec![EfiDebugImageInfo { normal_image: core::ptr::null() }; IMAGE_INFO_TABLE_SIZE].into_boxed_slice();
 

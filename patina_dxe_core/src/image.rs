@@ -45,7 +45,7 @@ use crate::{
         PROTOCOL_DB, core_install_protocol_interface, core_locate_device_path, core_uninstall_protocol_interface,
     },
     runtime,
-    systemtables::EfiSystemTable,
+    systemtables::EfiSystemTableOld,
     tpl_mutex,
 };
 
@@ -519,7 +519,7 @@ fn empty_image_info() -> efi::protocols::loaded_image::Protocol {
 
 // retrieves the dxe core image info from the hob list, and installs the
 // loaded_image protocol on it to create the dxe_core image handle.
-fn install_dxe_core_image(hob_list: &HobList, system_table: &mut EfiSystemTable) {
+fn install_dxe_core_image(hob_list: &HobList, system_table: &mut EfiSystemTableOld) {
     // Retrieve the MemoryAllocationModule hob corresponding to the DXE core
     // (i.e. this driver).
     let dxe_core_hob = hob_list
@@ -1418,7 +1418,7 @@ extern "efiapi" fn exit(
 }
 
 /// Initializes image services for the DXE core.
-pub fn init_image_support(hob_list: &HobList, system_table: &mut EfiSystemTable) {
+pub fn init_image_support(hob_list: &HobList, system_table: &mut EfiSystemTableOld) {
     // initialize system table entry in private global.
     let mut private_data = PRIVATE_IMAGE_DATA.lock();
     private_data.system_table = system_table.as_ptr() as *mut efi::SystemTable;

@@ -275,7 +275,7 @@ pub fn init_misc_boot_services_support(bs: &mut efi::BootServices) {
 mod tests {
     use super::*;
     use crate::{
-        systemtables::{self, EfiSystemTable},
+        systemtables::{self, EfiSystemTableOld},
         test_support,
     };
     use core::{ffi::c_void, ptr};
@@ -312,7 +312,7 @@ mod tests {
 
     fn with_locked_state<F>(f: F)
     where
-        F: Fn(&mut EfiSystemTable) + std::panic::RefUnwindSafe,
+        F: Fn(&mut EfiSystemTableOld) + std::panic::RefUnwindSafe,
     {
         test_support::with_global_lock(|| {
             // SAFETY: Test code only - initializing test infrastructure with the test lock held

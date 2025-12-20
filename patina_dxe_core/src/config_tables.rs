@@ -51,7 +51,7 @@ pub fn core_install_configuration_table(
     vendor_table: *mut c_void,
     efi_system_table: &mut EfiSystemTable,
 ) -> Result<Option<NonNull<c_void>>, EfiError> {
-    let system_table = efi_system_table.as_mut();
+    let mut system_table = efi_system_table.get();
     //if a table is already present, reconstruct it from the pointer and length in the st.
     let old_cfg_table = if system_table.configuration_table.is_null() {
         assert_eq!(system_table.number_of_table_entries, 0);
@@ -90,11 +90,9 @@ pub fn core_install_configuration_table(
                     old_vendor_table_ptr = NonNull::new(entry.vendor_table);
                     current_table.retain(|x| x.vendor_guid != vendor_guid);
                 } else {
-                    //entry does not exist, we can't delete it. We have to put the original box back
-                    //in the config table so it doesn't get dropped though. Pointer should be the same
-                    //so we should not need to recompute CRC.
-                    system_table.configuration_table =
-                        Box::into_raw_with_allocator(cfg_table).0 as *mut efi::ConfigurationTable;
+                    // entry does not exist, we can't delete it. Put the box back into raw to avoid dropping it. The
+                    // pointer is already in the System table, so no need to update it.
+                    _ = Box::into_raw_with_allocator(cfg_table).0 as *mut efi::ConfigurationTable;
                     return Err(EfiError::NotFound);
                 }
             }
@@ -124,8 +122,8 @@ pub fn core_install_configuration_table(
         let new_table = new_table.to_vec_in(&EFI_RUNTIME_SERVICES_DATA_ALLOCATOR).into_boxed_slice();
         system_table.configuration_table = Box::into_raw_with_allocator(new_table).0 as *mut efi::ConfigurationTable;
     }
-    //since we modified the system table, re-calculate CRC.
-    efi_system_table.checksum();
+    //since we modified the system table, write it back out (which will also update the checksum)
+    efi_system_table.set(system_table);
 
     //signal the table guid as an event group
     EVENT_DB.signal_group(vendor_guid);
