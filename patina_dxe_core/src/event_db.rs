@@ -600,6 +600,9 @@ impl Drop for EventGuard<'_> {
 pub struct SpinLockedEventDb {
     inner: tpl_mutex::TplMutex<EventDb>,
     pending_signals: tpl_mutex::TplMutex<Vec<PendingSignals>>,
+    // Tracks valid event IDs separately from the main lock so that event validity
+    // can be checked in the lock-contention path of signal_event.
+    valid_events: tpl_mutex::TplMutex<BTreeSet<usize>>,
 }
 
 impl Default for SpinLockedEventDb {
@@ -614,6 +617,7 @@ impl SpinLockedEventDb {
         SpinLockedEventDb {
             inner: tpl_mutex::TplMutex::new(efi::TPL_HIGH_LEVEL, EventDb::new(), "EventLock"),
             pending_signals: tpl_mutex::TplMutex::new(efi::TPL_HIGH_LEVEL, Vec::new(), "pendingSignalsLock"),
+            valid_events: tpl_mutex::TplMutex::new(efi::TPL_HIGH_LEVEL, BTreeSet::new(), "validEventsLock"),
         }
     }
 
@@ -643,7 +647,9 @@ impl SpinLockedEventDb {
         notify_context: Option<*mut c_void>,
         event_group: Option<efi::Guid>,
     ) -> Result<efi::Event, EfiError> {
-        self.lock().create_event(event_type, notify_tpl, notify_function, notify_context, event_group)
+        let event = self.lock().create_event(event_type, notify_tpl, notify_function, notify_context, event_group)?;
+        self.valid_events.lock().insert(event as usize);
+        Ok(event)
     }
 
     /// Closes (deletes) an event from the event database
@@ -655,7 +661,9 @@ impl SpinLockedEventDb {
     ///
     /// Returns r_efi:efi::Status::INVALID_PARAMETER if incorrect parameters are given.
     pub fn close_event(&self, event: efi::Event) -> Result<(), EfiError> {
-        self.lock().close_event(event)
+        self.lock().close_event(event)?;
+        self.valid_events.lock().remove(&(event as usize));
+        Ok(())
     }
 
     /// Marks an event as signaled, and queues it for dispatch if it is of type NotifySignalEvent
@@ -670,6 +678,12 @@ impl SpinLockedEventDb {
         if let Some(mut guard) = self.try_lock() {
             guard.signal_event(event)
         } else {
+            // Validate event before queuing to avoid silently swallowing errors for invalid events.
+            if let Some(valid_events) = self.valid_events.try_lock() {
+                if !valid_events.contains(&(event as usize)) {
+                    return Err(EfiError::InvalidParameter);
+                }
+            }
             //unable to acquire lock; queue signal for later processing.
             if let Some(mut pending_signals) = self.pending_signals.try_lock() {
                 pending_signals.push(PendingSignals::Event(event));
