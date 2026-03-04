@@ -214,26 +214,42 @@ components/pci_bus/
 **Tasks:**
 
 1. **PciBar** (`pci_device/bar.rs`)
-   - Enum `PciBarType { Io16, Io32, Mem32, PMem32, Mem64, PMem64, OpRom, Unknown }`
+   - Enum `PciBarType { Unknown, Io16, Io32, Mem32, PMem32, Mem64, PMem64, OpRom, Io, Mem, MaxType }`
+     (11 variants matching C enum order — `Unknown` = 0, `MaxType` = 10)
    - Struct `PciBar { base_address: u64, length: u64, alignment: u64, bar_type: PciBarType,
      bar_type_fixed: bool, offset: u16 }`
-   - Reference: `PCI_BAR` in `PciBus.h`
+   - Constant `PCI_MAX_BAR: usize = 6` (standard BARs only; ROM BAR handled separately)
+   - Reference: `PCI_BAR` and `PCI_BAR_TYPE` in `PciBus.h`
 
 2. **PciIoDevice** (`pci_device.rs`)
-   - Primary struct with all device state fields
+   - Primary struct with device state fields (C has ~40+ fields; some won't translate directly)
    - Device identity: bus/device/function, PCI config header (`PCI_TYPE00` from r-efi or custom)
-   - Resource management: BARs array (6 entries), attributes, decode capabilities
-   - Hierarchy: parent reference (Option<&PciIoDevice> or handle), children Vec
-   - Status flags: registered, allocated, rom_processed
-   - PCIe capabilities: offsets for PCIe, ARI, SR-IOV, MR-IOV
-   - Device path storage, handle reference
+   - Resource management: `pci_bar: [PciBar; PCI_MAX_BAR]`, attributes (`u64`), supports (`u64`),
+     decodes (`u32`)
+   - Hierarchy: parent handle (`Option<efi::Handle>`), children `Vec<Box<PciIoDevice>>` (replaces
+     C `LIST_ENTRY ChildList`)
+   - Status flags: registered, allocated, all_op_rom_processed, embedded_rom, bus_override
+   - ROM: rom_size (`u32`), ignore_rom (`bool`)
+   - Protocol pointers: device_path, pci_root_bridge_io (stored as pointers, not embedded structs)
+   - PCIe capabilities: is_pci_exp, is_ari_enabled, pci_express_capability_offset (`u8`),
+     ari/sriov/mriov capability offsets (`u32`)
+   - SR-IOV: `vf_pci_bar: [PciBar; PCI_MAX_BAR]`, system_page_size, initial_vfs, reserved_bus_num
+   - Bridge: bridge_io_alignment (`u16`), resizable_bar_offset/number
+   - Hot plug: resource_padding_descriptors, padding_attributes, bus_number_ranges
+   - Max payload size (`u8`)
+   - Handle (`efi::Handle`)
+   - **Not translated directly:** C `Signature` (use Rust type system), `Link` (use Vec in parent),
+     inline protocol structs (`PciIo`, `PciDriverOverride`, `LoadFile2` — build at registration time)
    - Methods for construction, capability queries
-   - Reference: `PCI_IO_DEVICE` in `PciBus.h` (~80 fields)
+   - Reference: `PCI_IO_DEVICE` in `PciBus.h`
 
 3. **PciResourceNode** (`resource/resource_node.rs`)
    - Tree structure for resource requirements
-   - Fields: alignment, offset, length, bar index, resource type, usage
-   - Children Vec for bridge aggregation
+   - Fields: alignment (`u64`), offset (`u64`), length (`u64`), bar (`u8`),
+     res_type (`PciBarType`), reserved (`bool`), resource_usage (`PciResourceUsage`),
+     virtual_bar (`bool`), pci_dev back-reference (`Option<*mut PciIoDevice>`)
+   - Enum `PciResourceUsage { Typical, Padding }`
+   - Children `Vec<PciResourceNode>` (replaces C `LIST_ENTRY ChildList`)
    - Methods: insert_sorted (by alignment descending), calculate_aperture
    - Reference: `PCI_RESOURCE_NODE` in `PciResourceSupport.h`
 
