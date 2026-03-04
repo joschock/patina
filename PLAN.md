@@ -68,6 +68,8 @@
 - **Safety comments:** All `unsafe` blocks must have `// SAFETY:` comments
 - **Doc comments:** All public items documented (`missing_docs` lint is error in workspace)
 - **Feature flags:** Map C PCDs to Cargo features with `#[cfg(feature = "...")]`
+- **User review:** Stop after completing each phase and wait for user review/approval before
+  proceeding to the next phase.
 
 ### What NOT to Do
 
@@ -254,8 +256,13 @@ components/pci_bus/
    - `PciBusDriverBinding<T: BootServices>` struct with `&'static T` and agent handle
    - `impl DriverBinding for PciBusDriverBinding<T>`
    - **Supported():** Opens `PciRootBridgeIoProtocol` BY_DRIVER, closes immediately; returns ALREADY_STARTED if applicable
-   - **Start():** Installs `PciBusInstance` marker protocol (stub body)
-   - **Stop():** Opens, uninstalls, and drops `PciBusInstance` marker protocol
+   - **TODO (Phase 4):** Supported() also needs `RemainingDevicePath` validation (must be end-of-path
+     or valid `HW_PCI_DP` node) and `DevicePathProtocol` open BY_DRIVER, matching the C reference
+   - **Start():** Stub body (TODO comments for Phases 4/5/8)
+   - **Stop():** Stub body (TODO comment for Phase 8)
+   - **Note:** The C reference does not use a private per-instance marker protocol; it relies on
+     BY_DRIVER opens and global state. A per-instance marker (like HID's pattern) can be added later
+     if a need is identified during implementation of Start/Stop.
    - **Note:** `open_protocol` is `unsafe` — wrapped with SAFETY comment
    - **Note:** DriverBinding trait uses `core::result::Result<T, efi::Status>`, NOT `patina::error::Result`
    - **Note:** Tests need `use patina::boot_services::c_ptr::CPtr` for `metadata()`
@@ -568,14 +575,15 @@ Use `Result<T, efi::Status>` throughout internal APIs. The FFI boundary converts
 ### 6. Phased Implementation Strategy
 
 This is a very large conversion (~19K lines of C). Each phase produces a compilable and testable
-increment:
+increment. **After completing each phase, stop and wait for user review before starting the next
+phase.**
 
-- **Phases 1-3:** Minimal compilable component that installs driver binding
-- **Phase 4:** Enumeration discovers devices (no resource allocation yet)
-- **Phase 5:** Resources allocated and BARs programmed
-- **Phase 6:** Full PCI I/O Protocol available to downstream drivers
-- **Phase 7:** Hot plug, option ROM, and other features added incrementally
-- **Phases 8-10:** Polish, testing, documentation
+- **Phases 1-3:** Minimal compilable component that installs driver binding → **review**
+- **Phase 4:** Enumeration discovers devices (no resource allocation yet) → **review**
+- **Phase 5:** Resources allocated and BARs programmed → **review**
+- **Phase 6:** Full PCI I/O Protocol available to downstream drivers → **review**
+- **Phase 7:** Hot plug, option ROM, and other features added incrementally → **review**
+- **Phases 8-10:** Polish, testing, documentation → **review after each**
 
 ---
 

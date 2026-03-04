@@ -5,17 +5,20 @@
 //! PCI I/O Protocol for each discovered PCI device.
 
 use alloc::boxed::Box;
+use core::ptr::NonNull;
 
-use r_efi::efi;
+use r_efi::{efi, protocols::device_path::Protocol as EfiDevicePathProtocol};
 
 use patina::{
     BinaryGuid,
     boot_services::{BootServices, StandardBootServices},
     component::{component, params},
-    driver_binding::UefiDriverBinding,
+    driver_binding::{DriverBinding, UefiDriverBinding},
     error::Result,
     uefi_protocol::ProtocolInterface,
 };
+
+use crate::protocols::root_bridge_io::PciRootBridgeIoProtocol;
 
 /// Zero-sized marker protocol used to create a dedicated driver binding handle.
 #[repr(C)]
@@ -24,7 +27,7 @@ struct PciBusMarker;
 // SAFETY: PciBusMarker is a ZST whose GUID uniquely identifies this component.
 unsafe impl ProtocolInterface for PciBusMarker {
     const PROTOCOL_GUID: efi::Guid =
-        *BinaryGuid::from_string("a2b3c4d5-e6f7-4a8b-9c0d-1e2f3a4b5c6d").as_efi_guid();
+        *BinaryGuid::from_string("3323f52c-5a73-40eb-b0d4-c0acde555568").as_efi_guid();
 }
 
 /// PCI Bus Patina component.
@@ -63,23 +66,6 @@ fn install_pci_bus_driver_binding<T: BootServices + Clone + 'static>(
     Ok(())
 }
 
-use crate::protocols::root_bridge_io::PciRootBridgeIoProtocol;
-use core::{ffi::c_void, ptr::NonNull};
-use patina::driver_binding::DriverBinding;
-use r_efi::protocols::device_path::Protocol as EfiDevicePathProtocol;
-
-// Use core::result::Result for DriverBinding trait compatibility (not patina::error::Result).
-type DriverResult<T> = core::result::Result<T, efi::Status>;
-
-/// Per-controller context installed as a private protocol to track PCI bus state.
-struct PciBusInstance;
-
-// SAFETY: PciBusInstance GUID uniquely identifies this private protocol.
-unsafe impl ProtocolInterface for PciBusInstance {
-    const PROTOCOL_GUID: efi::Guid =
-        *BinaryGuid::from_string("b3c4d5e6-f7a8-4b9c-0d1e-2f3a4b5c6d7e").as_efi_guid();
-}
-
 /// PCI bus driver binding implementation.
 ///
 /// Manages PCI bus instances on controllers that expose the PCI Root Bridge I/O
@@ -104,7 +90,7 @@ impl<T: BootServices + Clone + 'static> DriverBinding for PciBusDriverBinding<T>
         _boot_services: &'static U,
         controller: efi::Handle,
         _remaining_device_path: Option<NonNull<EfiDevicePathProtocol>>,
-    ) -> DriverResult<bool> {
+    ) -> core::result::Result<bool, efi::Status> {
         // Try to open the PCI Root Bridge I/O Protocol to test support.
         // SAFETY: Testing protocol presence on controller; the protocol pointer
         // is not dereferenced and is immediately closed.
@@ -142,15 +128,11 @@ impl<T: BootServices + Clone + 'static> DriverBinding for PciBusDriverBinding<T>
     /// resources, and installs PCI I/O Protocol for each discovered device.
     fn driver_binding_start<U: BootServices + 'static>(
         &mut self,
-        boot_services: &'static U,
+        _boot_services: &'static U,
         controller: efi::Handle,
         _remaining_device_path: Option<NonNull<EfiDevicePathProtocol>>,
-    ) -> DriverResult<()> {
+    ) -> core::result::Result<(), efi::Status> {
         log::trace!("driver_binding_start: starting PCI bus on controller {:?}", controller);
-
-        // Install private protocol to track this instance.
-        let instance = Box::new(PciBusInstance);
-        boot_services.install_protocol_interface(Some(controller), instance)?;
 
         // TODO: Phase 4 - Enumerate PCI devices
         // TODO: Phase 5 - Allocate resources
@@ -162,41 +144,15 @@ impl<T: BootServices + Clone + 'static> DriverBinding for PciBusDriverBinding<T>
     /// Stops PCI bus support for the given controller.
     fn driver_binding_stop<U: BootServices + 'static>(
         &mut self,
-        boot_services: &'static U,
+        _boot_services: &'static U,
         controller: efi::Handle,
         _number_of_children: usize,
         _child_handle_buffer: Option<NonNull<efi::Handle>>,
-    ) -> DriverResult<()> {
+    ) -> core::result::Result<(), efi::Status> {
         log::trace!("driver_binding_stop: stopping PCI bus on controller {:?}", controller);
 
         // TODO: Phase 8 - Deregister devices
 
-        // Remove private protocol instance.
-        // SAFETY: The private protocol was installed on this controller by start.
-        let instance = unsafe {
-            boot_services.open_protocol_unchecked(
-                controller,
-                &PciBusInstance::PROTOCOL_GUID,
-                self.agent,
-                controller,
-                efi::OPEN_PROTOCOL_GET_PROTOCOL,
-            )
-        }? as *mut PciBusInstance;
-
-        // SAFETY: Uninstalling our private protocol interface.
-        if let Err(status) = unsafe {
-            boot_services.uninstall_protocol_interface_unchecked(
-                controller,
-                &PciBusInstance::PROTOCOL_GUID,
-                instance as *mut c_void,
-            )
-        } {
-            log::error!("driver_binding_stop: failed to uninstall protocol: {status:x?}");
-            return Err(status);
-        }
-
-        // SAFETY: instance was created via Box::into_raw (through install_protocol_interface) in start.
-        drop(unsafe { Box::from_raw(instance) });
         Ok(())
     }
 }
