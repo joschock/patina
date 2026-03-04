@@ -2,25 +2,27 @@
 
 ## Current Progress
 
-> **Last updated:** 2026-03-04 (Session 1)
+> **Last updated:** 2026-03-04 (Session 2)
 >
-> **Build:** `cargo build -p pci_bus` ✅ | `cargo test -p pci_bus` ✅ (6 tests passing)
+> **Build:** `cargo build -p pci_bus` ✅ | `cargo test -p pci_bus` ✅ (12 tests passing)
 >
 > | Phase | Status | Notes |
 > |-------|--------|-------|
 > | 1. Scaffolding & Protocol FFI | 🔶 Partial | Crate created, root_bridge_io done. 7 more protocols to add as needed. |
-> | 2. Core Data Structures | ⬜ Not started | |
+> | 2. Core Data Structures | ✅ Done | PciBar, PciIoDevice, PciResourceNode, PCI config headers. |
 > | 3. Component & Driver Binding | 🔶 Skeleton | Entry point + driver binding compile with stub Start/Stop. |
 > | 4. PCI Enumeration | ⬜ Not started | |
 > | 5. Resource Allocation | ⬜ Not started | |
 > | 6. PCI I/O Protocol | ⬜ Not started | |
 > | 7. Supporting Features | ⬜ Not started | |
 > | 8. Device Lifecycle | ⬜ Not started | |
-> | 9. Testing | ⬜ Not started | 6 tests exist from Phases 1 & 3 |
+> | 9. Testing | ⬜ Not started | 12 tests exist from Phases 1, 2 & 3 |
 > | 10. Integration & Docs | ⬜ Not started | |
 >
-> **Next steps:** Phase 2 (PciBar, PciIoDevice, PciResourceNode data structures), then Phase 4
-> (enumeration) which also requires the Host Bridge Resource Allocation protocol FFI definition.
+> **Next steps:** Phase 4 (PCI enumeration: bus scanning, BAR scanning, capability parsing),
+> which also requires the Host Bridge Resource Allocation protocol FFI definition.
+> Phase 3 (driver binding) is intentionally left as a skeleton — Start/Stop bodies and the
+> Supported device path check will be completed as part of Phases 4, 5, and 8.
 
 ---
 
@@ -209,7 +211,7 @@ components/pci_bus/
 
 **Goal:** Define the Rust equivalents of C data structures.
 
-**Status:** Not started
+**Status:** ✅ Done
 
 **Tasks:**
 
@@ -221,16 +223,17 @@ components/pci_bus/
    - Constant `PCI_MAX_BAR: usize = 6` (standard BARs only; ROM BAR handled separately)
    - Reference: `PCI_BAR` and `PCI_BAR_TYPE` in `PciBus.h`
 
-2. **PciIoDevice** (`pci_device.rs`)
-   - Primary struct with device state fields (C has ~40+ fields; some won't translate directly)
-   - Device identity: bus/device/function, PCI config header (`PCI_TYPE00` from r-efi or custom)
+2. **PciIoDevice** (`pci_device/device.rs`)
+   - Primary struct with device state fields
+   - `PciIoDeviceRef` type alias: `Rc<RefCell<PciIoDevice>>` for shared mutable ownership
+   - Device identity: bus/device/function, PCI config header (custom `PciType00`/`PciType01`
+     in `pci_device/pci_config.rs`)
    - Resource management: `pci_bar: [PciBar; PCI_MAX_BAR]`, attributes (`u64`), supports (`u64`),
      decodes (`u32`)
-   - Hierarchy: parent handle (`Option<efi::Handle>`), children `Vec<Box<PciIoDevice>>` (replaces
-     C `LIST_ENTRY ChildList`)
+   - Hierarchy: parent `Option<Weak<RefCell<PciIoDevice>>>`, children `Vec<PciIoDeviceRef>`
    - Status flags: registered, allocated, all_op_rom_processed, embedded_rom, bus_override
    - ROM: rom_size (`u32`), ignore_rom (`bool`)
-   - Protocol pointers: device_path, pci_root_bridge_io (stored as pointers, not embedded structs)
+   - Protocol pointers: device_path, pci_root_bridge_io (stored as raw pointers)
    - PCIe capabilities: is_pci_exp, is_ari_enabled, pci_express_capability_offset (`u8`),
      ari/sriov/mriov capability offsets (`u32`)
    - SR-IOV: `vf_pci_bar: [PciBar; PCI_MAX_BAR]`, system_page_size, initial_vfs, reserved_bus_num
@@ -238,20 +241,15 @@ components/pci_bus/
    - Hot plug: resource_padding_descriptors, padding_attributes, bus_number_ranges
    - Max payload size (`u8`)
    - Handle (`efi::Handle`)
-   - **Not translated directly:** C `Signature` (use Rust type system), `Link` (use Vec in parent),
-     inline protocol structs (`PciIo`, `PciDriverOverride`, `LoadFile2` — build at registration time)
-   - Methods for construction, capability queries
-   - Reference: `PCI_IO_DEVICE` in `PciBus.h`
 
 3. **PciResourceNode** (`resource/resource_node.rs`)
    - Tree structure for resource requirements
    - Fields: alignment (`u64`), offset (`u64`), length (`u64`), bar (`u8`),
      res_type (`PciBarType`), reserved (`bool`), resource_usage (`PciResourceUsage`),
-     virtual_bar (`bool`), pci_dev back-reference (`Option<*mut PciIoDevice>`)
+     virtual_bar (`bool`), pci_dev (`PciIoDeviceRef` — always present, not optional)
    - Enum `PciResourceUsage { Typical, Padding }`
-   - Children `Vec<PciResourceNode>` (replaces C `LIST_ENTRY ChildList`)
-   - Methods: insert_sorted (by alignment descending), calculate_aperture
-   - Reference: `PCI_RESOURCE_NODE` in `PciResourceSupport.h`
+   - Children `Vec<PciResourceNode>` (replaces C linked list)
+   - Methods: insert_sorted (by alignment descending)
 
 ### Phase 3: Component Entry Point & Driver Binding
 

@@ -4,7 +4,7 @@
 //! from the UEFI specification. This protocol is consumed by the PCI bus driver
 //! to perform PCI configuration, memory, and I/O operations on a PCI root bridge.
 //!
-//! Reference: UEFI Specification 2.10, Section 14.2
+
 
 use core::ffi::c_void;
 
