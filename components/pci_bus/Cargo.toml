@@ -1,0 +1,33 @@
+# Copyright (c) Microsoft Corporation. All rights reserved.
+[package]
+name = "pci_bus"
+version.workspace = true
+repository.workspace = true
+license.workspace = true
+edition.workspace = true
+description = "PCI Bus Driver as a Patina component. Enumerates PCI devices and produces PCI I/O Protocol."
+
+[lints]
+workspace = true
+
+[features]
+default = ["degrade-for-optrom"]
+hot-plug = []
+io-alignment-probe = []
+unaligned-pci-io = []
+degrade-for-optrom = []
+sriov = []
+ari = []
+mriov = []
+resizable-bar = []
+defer-bme = []
+disable-bme-on-ebs = []
+
+[dependencies]
+log = { workspace = true }
+patina = { workspace = true }
+r-efi = { workspace = true }
+
+[dev-dependencies]
+mockall = { workspace = true }
+patina = { workspace = true, features = ["mockall"] }
