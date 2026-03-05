@@ -134,8 +134,7 @@ pub struct PciHostBridgeResourceAllocationProtocol {
 // EFI_PCI_HOST_BRIDGE_RESOURCE_ALLOCATION_PROTOCOL and the GUID is the
 // standard protocol GUID from the specification.
 unsafe impl ProtocolInterface for PciHostBridgeResourceAllocationProtocol {
-    const PROTOCOL_GUID: efi::Guid =
-        *BinaryGuid::from_string("cf8034be-6768-4d8b-b739-7cce683a9fbe").as_efi_guid();
+    const PROTOCOL_GUID: efi::Guid = *BinaryGuid::from_string("cf8034be-6768-4d8b-b739-7cce683a9fbe").as_efi_guid();
 }
 
 #[cfg(test)]
@@ -145,10 +144,7 @@ mod test {
     #[test]
     fn test_host_bridge_alloc_protocol_guid() {
         let guid = PciHostBridgeResourceAllocationProtocol::PROTOCOL_GUID;
-        assert_eq!(
-            guid.as_fields(),
-            (0xcf8034be, 0x6768, 0x4d8b, 0xb7, 0x39, &[0x7c, 0xce, 0x68, 0x3a, 0x9f, 0xbe])
-        );
+        assert_eq!(guid.as_fields(), (0xcf8034be, 0x6768, 0x4d8b, 0xb7, 0x39, &[0x7c, 0xce, 0x68, 0x3a, 0x9f, 0xbe]));
     }
 
     #[test]

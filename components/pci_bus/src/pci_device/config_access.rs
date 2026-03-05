@@ -103,13 +103,11 @@ impl PciConfigAccess for RootBridgeIoAccess {
         // SAFETY: rbi is valid per construction invariant
         unsafe {
             let proto = &*self.rbi;
-            (proto.pci.read)(
-                self.rbi,
-                Width::Uint8,
-                addr,
-                1,
-                &mut value as *mut u8 as *mut core::ffi::c_void,
-            );
+            let status =
+                (proto.pci.read)(self.rbi, Width::Uint8, addr, 1, &mut value as *mut u8 as *mut core::ffi::c_void);
+            if status.is_error() {
+                log::warn!("PCI config read_u8 failed at {:?} offset {:#x}: {:#x}", loc, offset, status.as_usize());
+            }
         }
         value
     }
@@ -120,13 +118,11 @@ impl PciConfigAccess for RootBridgeIoAccess {
         // SAFETY: rbi is valid per construction invariant
         unsafe {
             let proto = &*self.rbi;
-            (proto.pci.read)(
-                self.rbi,
-                Width::Uint16,
-                addr,
-                1,
-                &mut value as *mut u16 as *mut core::ffi::c_void,
-            );
+            let status =
+                (proto.pci.read)(self.rbi, Width::Uint16, addr, 1, &mut value as *mut u16 as *mut core::ffi::c_void);
+            if status.is_error() {
+                log::warn!("PCI config read_u16 failed at {:?} offset {:#x}: {:#x}", loc, offset, status.as_usize());
+            }
         }
         value
     }
@@ -137,13 +133,11 @@ impl PciConfigAccess for RootBridgeIoAccess {
         // SAFETY: rbi is valid per construction invariant
         unsafe {
             let proto = &*self.rbi;
-            (proto.pci.read)(
-                self.rbi,
-                Width::Uint32,
-                addr,
-                1,
-                &mut value as *mut u32 as *mut core::ffi::c_void,
-            );
+            let status =
+                (proto.pci.read)(self.rbi, Width::Uint32, addr, 1, &mut value as *mut u32 as *mut core::ffi::c_void);
+            if status.is_error() {
+                log::warn!("PCI config read_u32 failed at {:?} offset {:#x}: {:#x}", loc, offset, status.as_usize());
+            }
         }
         value
     }
@@ -153,13 +147,11 @@ impl PciConfigAccess for RootBridgeIoAccess {
         // SAFETY: rbi is valid per construction invariant
         unsafe {
             let proto = &*self.rbi;
-            (proto.pci.write)(
-                self.rbi,
-                Width::Uint32,
-                addr,
-                1,
-                &value as *const u32 as *mut core::ffi::c_void,
-            );
+            let status =
+                (proto.pci.write)(self.rbi, Width::Uint32, addr, 1, &value as *const u32 as *mut core::ffi::c_void);
+            if status.is_error() {
+                log::warn!("PCI config write_u32 failed at {:?} offset {:#x}: {:#x}", loc, offset, status.as_usize());
+            }
         }
     }
 }

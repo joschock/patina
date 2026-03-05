@@ -5,7 +5,6 @@
 //! to perform PCI configuration, memory, and I/O operations on a PCI root bridge.
 //!
 
-
 use core::ffi::c_void;
 
 use patina::{BinaryGuid, uefi_protocol::ProtocolInterface};
@@ -119,10 +118,7 @@ pub type Map = unsafe extern "efiapi" fn(
 ) -> efi::Status;
 
 /// Function pointer type for Unmap.
-pub type Unmap = unsafe extern "efiapi" fn(
-    this: *mut PciRootBridgeIoProtocol,
-    mapping: *mut c_void,
-) -> efi::Status;
+pub type Unmap = unsafe extern "efiapi" fn(this: *mut PciRootBridgeIoProtocol, mapping: *mut c_void) -> efi::Status;
 
 /// Function pointer type for AllocateBuffer.
 pub type AllocateBuffer = unsafe extern "efiapi" fn(
@@ -142,8 +138,7 @@ pub type FreeBuffer = unsafe extern "efiapi" fn(
 ) -> efi::Status;
 
 /// Function pointer type for Flush.
-pub type Flush =
-    unsafe extern "efiapi" fn(this: *mut PciRootBridgeIoProtocol) -> efi::Status;
+pub type Flush = unsafe extern "efiapi" fn(this: *mut PciRootBridgeIoProtocol) -> efi::Status;
 
 /// Function pointer type for GetAttributes.
 pub type GetAttributes = unsafe extern "efiapi" fn(
@@ -161,10 +156,8 @@ pub type SetAttributes = unsafe extern "efiapi" fn(
 ) -> efi::Status;
 
 /// Function pointer type for Configuration.
-pub type Configuration = unsafe extern "efiapi" fn(
-    this: *mut PciRootBridgeIoProtocol,
-    resources: *mut *mut c_void,
-) -> efi::Status;
+pub type Configuration =
+    unsafe extern "efiapi" fn(this: *mut PciRootBridgeIoProtocol, resources: *mut *mut c_void) -> efi::Status;
 
 /// PCI Root Bridge I/O Protocol.
 ///
@@ -210,8 +203,7 @@ pub struct PciRootBridgeIoProtocol {
 // SAFETY: The struct layout matches the UEFI spec's EFI_PCI_ROOT_BRIDGE_IO_PROTOCOL
 // and the GUID is the standard protocol GUID from the specification.
 unsafe impl ProtocolInterface for PciRootBridgeIoProtocol {
-    const PROTOCOL_GUID: efi::Guid =
-        *BinaryGuid::from_string("2f707ebb-4a1a-11d4-9a38-0090273fc14d").as_efi_guid();
+    const PROTOCOL_GUID: efi::Guid = *BinaryGuid::from_string("2f707ebb-4a1a-11d4-9a38-0090273fc14d").as_efi_guid();
 }
 
 // PCI Root Bridge I/O Protocol attribute constants.

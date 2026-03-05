@@ -26,8 +26,7 @@ struct PciBusMarker;
 
 // SAFETY: PciBusMarker is a ZST whose GUID uniquely identifies this component.
 unsafe impl ProtocolInterface for PciBusMarker {
-    const PROTOCOL_GUID: efi::Guid =
-        *BinaryGuid::from_string("3323f52c-5a73-40eb-b0d4-c0acde555568").as_efi_guid();
+    const PROTOCOL_GUID: efi::Guid = *BinaryGuid::from_string("3323f52c-5a73-40eb-b0d4-c0acde555568").as_efi_guid();
 }
 
 /// PCI Bus Patina component.

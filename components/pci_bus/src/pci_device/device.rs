@@ -219,11 +219,7 @@ impl PciIoDevice {
         if sizing_mask == 0 { None } else { Some((sizing_mask, saved)) }
     }
 
-    fn parse_bar(
-        &self,
-        config: &dyn PciConfigAccess,
-        offset: u32,
-    ) -> Result<Option<PciBar>, InvalidBarError> {
+    fn parse_bar(&self, config: &dyn PciConfigAccess, offset: u32) -> Result<Option<PciBar>, InvalidBarError> {
         let Some((sizing_mask, saved)) = self.probe_bar(config, offset) else {
             return Ok(None);
         };
@@ -235,21 +231,11 @@ impl PciIoDevice {
         let prefetchable = (sizing_mask & BAR_BIT_PREFETCHABLE) != 0;
 
         match sizing_mask & BAR_MEM_TYPE_MASK {
-            BAR_MEM_TYPE_32 => {
-                PciBar::from_mem32(sizing_mask, saved, prefetchable, offset).map(Some)
-            }
+            BAR_MEM_TYPE_32 => PciBar::from_mem32(sizing_mask, saved, prefetchable, offset).map(Some),
             BAR_MEM_TYPE_64 => {
                 let (upper_sizing, upper_saved) =
-                    self.probe_bar(config, offset + BAR_REGISTER_SIZE)
-                        .unwrap_or((0xFFFF_FFFF, 0));
-                PciBar::from_mem64(
-                    sizing_mask,
-                    saved,
-                    upper_sizing,
-                    upper_saved,
-                    prefetchable,
-                    offset,
-                ).map(Some)
+                    self.probe_bar(config, offset + BAR_REGISTER_SIZE).unwrap_or((0xFFFF_FFFF, 0));
+                PciBar::from_mem64(sizing_mask, saved, upper_sizing, upper_saved, prefetchable, offset).map(Some)
             }
             _ => Err(InvalidBarError { offset, sizing_mask }),
         }
@@ -267,7 +253,11 @@ impl PciIoDevice {
                     offset = bar.next_offset();
                     bars.push(bar);
                 }
-                _ => {
+                Ok(None) => {
+                    offset += BAR_REGISTER_SIZE;
+                }
+                Err(e) => {
+                    log::warn!("scan_bars: failed to parse BAR at offset {:#x}: {:?}", offset, e);
                     offset += BAR_REGISTER_SIZE;
                 }
             }
@@ -309,11 +299,7 @@ impl PciIoDevice {
         None
     }
 
-    fn locate_extended_capability(
-        &self,
-        config: &dyn PciConfigAccess,
-        cap_id: u16,
-    ) -> Option<u32> {
+    fn locate_extended_capability(&self, config: &dyn PciConfigAccess, cap_id: u16) -> Option<u32> {
         let loc = self.location();
         let mut cap_ptr = PCIE_CAPABILITY_BASE_OFFSET;
 

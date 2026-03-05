@@ -82,11 +82,7 @@ impl PciBar {
     }
 
     /// Constructs an I/O BAR from sizing mask and saved register contents.
-    pub(crate) fn from_io(
-        sizing_mask: u32,
-        saved: u32,
-        offset: u32,
-    ) -> Result<Self, InvalidBarError> {
+    pub(crate) fn from_io(sizing_mask: u32, saved: u32, offset: u32) -> Result<Self, InvalidBarError> {
         let is_32bit = (sizing_mask & 0xFFFF_0000) != 0;
         let raw_size = (!(sizing_mask & IO_BAR_BASE_MASK)).wrapping_add(1);
         let length = if is_32bit { raw_size as u64 } else { (raw_size & 0xFFFF) as u64 };
@@ -138,8 +134,7 @@ impl PciBar {
         offset: u32,
     ) -> Result<Self, InvalidBarError> {
         let base = (lower_saved & MEM_BAR_BASE_MASK) as u64 | ((upper_saved as u64) << 32);
-        let combined =
-            (lower_sizing & MEM_BAR_BASE_MASK) as u64 | ((upper_sizing as u64) << 32);
+        let combined = (lower_sizing & MEM_BAR_BASE_MASK) as u64 | ((upper_sizing as u64) << 32);
         let length = (!combined).wrapping_add(1);
 
         if length == 0 {

@@ -2,27 +2,29 @@
 
 ## Current Progress
 
-> **Last updated:** 2026-03-05 (Session 3 — Phase 4 review & cleanup)
+> **Last updated:** 2026-03-05 (Session 5 — Phase 5 review refactors complete)
 >
-> **Build:** `cargo build -p pci_bus` ✅ | `cargo test -p pci_bus` ✅ (16 tests passing)
+> **Build:** `cargo build -p pci_bus` ✅ | `cargo test -p pci_bus` ✅ (24 tests passing)
 > | `cargo clippy -p pci_bus` ✅ (0 warnings)
 >
 > | Phase | Status | Notes |
 > |-------|--------|-------|
 > | 1. Scaffolding & Protocol FFI | 🔶 Partial | root_bridge_io + host_bridge_alloc done. Remaining protocols added as needed. |
-> | 2. Core Data Structures | ✅ Done | PciBar, PciIoDevice (Rc/RefCell), PciResourceNode, PCI config headers. |
+> | 2. Core Data Structures | ✅ Done | PciBar, PciIoDevice (Rc/RefCell), PciResourceNode, PCI config headers, ResourceKind enum. |
 > | 3. Component & Driver Binding | 🔶 Skeleton | Entry point + driver binding compile with stub Start/Stop. |
 > | 4. PCI Enumeration | ✅ Done | BAR scanning, bus scanning, capability parsing. Extensively reviewed and refactored. |
-> | 5. Resource Allocation | ⬜ Not started | |
+> | 5. Resource Allocation | ✅ Done | Resource tree construction, degradation, aperture calc, BAR/bridge programming. Reviewed and refactored in Session 5. |
+> | 5a. PciIoDevice Encapsulation | ⬜ Not started | Make PciIoDevice fields private, add accessor methods. Must complete before Phase 6. |
+> | 5b. TPL Protection for BAR Probing | ⬜ Not started | Add raise_tpl_guarded() around probe_bar critical section. |
 > | 6. PCI I/O Protocol | ⬜ Not started | |
 > | 7. Supporting Features | ⬜ Not started | |
 > | 8. Device Lifecycle | ⬜ Not started | |
-> | 9. Testing | ⬜ Not started | 16 tests exist from Phases 1-4 |
+> | 9. Testing | ⬜ Not started | 24 tests exist from Phases 1-5 |
 > | 10. Integration & Docs | ⬜ Not started | |
 >
-> **Next steps:** Phase 5 (resource allocation: tree construction, aperture calculation, BAR programming).
+> **Next steps:** Phase 5a (PciIoDevice encapsulation), then Phase 6 (PCI I/O Protocol).
 > Phase 3 (driver binding) is intentionally left as a skeleton — Start/Stop bodies and the
-> Supported device path check will be completed as part of Phases 5 and 8.
+> Supported device path check will be completed as part of Phases 6 and 8.
 
 ---
 
@@ -137,8 +139,9 @@ components/pci_bus/
     │   ├── config_access.rs       # PciConfigAccess trait, PciLocation, RootBridgeIoAccess
     │   └── pci_config.rs          # PCI config header structs (PciType00/PciType01)
     ├── resource/
-    │   ├── mod.rs                 # Re-exports
-    │   └── resource_node.rs       # PciResourceNode tree data structure
+    │   ├── mod.rs                 # Re-exports (PciResourceNode, ResourceSource, ResourcePools, etc.)
+    │   ├── resource_node.rs       # PciResourceNode tree, ResourceSource enum, PciResourceUsage enum
+    │   └── allocation.rs          # Resource allocation engine (tree, degradation, aperture, programming)
     ├── protocols/
     │   ├── mod.rs                 # Re-exports
     │   ├── root_bridge_io.rs      # PCI Root Bridge I/O Protocol FFI
@@ -240,9 +243,12 @@ components/pci_bus/
 
 3. **PciResourceNode** (`resource/resource_node.rs`)
    - Tree structure for resource requirements
-   - Fields: alignment (`u64`), offset (`u64`), length (`u64`), bar (`u8`),
+   - Fields: alignment (`u64`), offset (`u64`), length (`u64`), source (`ResourceSource`),
      res_type (`PciBarType`), reserved (`bool`), resource_usage (`PciResourceUsage`),
-     virtual_bar (`bool`), pci_dev (`PciIoDeviceRef` — always present, not optional)
+     pci_dev (`PciIoDeviceRef` — always present, not optional)
+   - Enum `ResourceSource { Bar(u8), VirtualBar(u8), BridgeIo, BridgeMem32, BridgePMem32, BridgePMem64 }`
+     — type-safe replacement for the C pattern of overloading a `bar: u8` field with magic
+     constants (e.g. `PPB_IO_RANGE=2`, `PPB_MEM32_RANGE=3`) for bridge aperture nodes
    - Enum `PciResourceUsage { Typical, Padding }`
    - Children `Vec<PciResourceNode>` (replaces C linked list)
    - Methods: insert_sorted (by alignment descending)
@@ -344,34 +350,135 @@ components/pci_bus/
 
 **Goal:** Implement BAR and bridge aperture resource allocation.
 
-**Status:** Not started
+**Status:** ✅ Done
 
 **C source reference:** `PciResourceSupport.c` (~2,395 lines)
 
+**Implementation notes (for future agents):**
+
+- Resource allocation is split between `resource/allocation.rs` (pool management, tree
+  construction, degradation) and `resource/resource_node.rs` (node struct, aperture
+  calculation, programming).
+- `ResourcePools` struct holds 5 root nodes (io, mem32, pmem32, mem64, pmem64). Created
+  via `ResourcePools::new(bridge)` which debug-asserts the device is a bridge.
+- `ResourceKind` enum (in `resource_node.rs`) replaced the C pattern of overloading
+  `bar: u8` with magic constants for bridge windows. BAR variants carry their `PciBarType`
+  as payload; bridge variants have fixed types via `res_type()` method.
+  Variants: `Bar(u8, PciBarType)`, `VirtualBar(u8, PciBarType)`, `BridgeIo`, `BridgeMem32`,
+  `BridgeMem64`, `BridgePMem32`, `BridgePMem64`.
+- `BridgeMem64` exists for pool type accuracy but is a no-op during programming (PCI bridges
+  have no 64-bit non-prefetchable window). Logs a warning if reached without degradation.
+- `PciResourceNode::program()` dispatches on `ResourceKind` variants rather than calling
+  `is_bridge()` at runtime — the resource kind is data-driven.
+- `PciConfigAccess` trait is used for all register writes (not raw PciIo protocol like C).
+- Bridge aperture register offsets are in `pci_config::ppb_regs` module.
+- ISA/VGA alias skip logic is omitted from IO aperture calculation (acceptable simplification).
+- Hot-plug padding injection is omitted (can be added in Phase 7).
+
+**Actual files:**
+
+| Planned | Actual | Notes |
+|---------|--------|-------|
+| `resource/mod.rs` | `resource/mod.rs` | Re-exports ResourcePools, PciResourceNode, ResourceKind, PciResourceUsage |
+| `resource/aperture.rs` | `resource/resource_node.rs` | `calculate_aperture()` method on PciResourceNode |
+| `resource/programming.rs` | `resource/resource_node.rs` | `program()` method on PciResourceNode |
+
+**Key APIs:**
+
+| Location | API | Purpose |
+|----------|-----|---------|
+| `ResourcePools::new(bridge)` | constructor | Creates 5 empty resource pools for a bridge device |
+| `ResourcePools::has_requests()` | method | Returns true if any pool has child nodes |
+| `ResourcePools::add_device_resources(dev)` | method | Extracts BAR requirements into appropriate pools |
+| `ResourcePools::degrade(bridge)` | method | Applies resource degradation based on bridge decode caps |
+| `create_resource_map(bridge, pools)` | free fn | Recursively builds resource tree for a bridge hierarchy |
+| `drain_and_retype(dst, src)` | free fn | Drains children between pools, retyping to dst |
+| `drain_preserving_type(dst, src)` | free fn | Drains children between pools, preserving type |
+| `PciResourceNode::calculate_aperture()` | method | Bottom-up sizing with alignment-aware offset computation |
+| `PciResourceNode::program(base, config)` | method | Top-down address assignment through the tree |
+
+**Degradation paths (in `ResourcePools::degrade`):**
+- MEM64 → MEM32 (if bridge lacks MEM64 decode)
+- PMEM64 → PMEM32 (if bridge lacks PMEM64 decode)
+- PMEM32 → MEM32 (if bridge lacks PMEM32 decode, or if PMEM64+PMEM32 conflict)
+- Combined PMem+Mem merge (if bridge has PMEM_MEM_COMBINE decode flag)
+
+**Bridge decode flags** are in `pci_device::device::bridge_decode` module:
+`MEM64`, `PMEM64`, `PMEM32`, `PMEM_MEM_COMBINE`
+
+### Phase 5a: PciIoDevice Encapsulation
+
+**Goal:** Make `PciIoDevice` fields private and expose accessor methods, establishing a clean API
+surface before Phase 6 adds the PCI I/O Protocol (which will be the primary public consumer).
+
+**Status:** Not started
+
+**Motivation:** Currently all ~30 fields on `PciIoDevice` are `pub`. External modules reach through
+`Rc<RefCell<PciIoDevice>>` and directly read/write fields. This makes it hard to enforce invariants
+and will become a maintenance burden as more code consumes the struct in Phase 6+.
+
 **Tasks:**
 
-1. **Resource tree construction** (`resource/mod.rs`)
-   - `create_resource_map()` — build resource requirement tree from device list
-   - Five separate trees: IO, Mem32, PMem32, Mem64, PMem64
-   - Root nodes represent root bridge apertures
-   - Leaf nodes represent device BAR requirements
-   - Bridge nodes aggregate children
+1. **Audit field access** — categorize each field as read-only, read-write, or internal-only
+   based on current usage across `bus_scan.rs`, `resource/allocation.rs`, `resource/resource_node.rs`,
+   and `component.rs`.
 
-2. **Aperture calculation** (`resource/aperture.rs`)
-   - `calculate_resource_aperture()` — recursive bottom-up aperture sizing
-   - Sort children by alignment (descending) for optimal packing
-   - Bridge apertures = sum of children + alignment padding
-   - VGA range avoidance (0x3B0-0x3BB, 0x3C0-0x3DF for IO)
-   - ISA aliasing range handling (0x100-0x3FF)
-   - Resource degradation when host bridge doesn't support 64-bit:
-     PMem64 → Mem64 → Mem32; PMem64 → PMem32 → Mem32; IO32 → IO16
+2. **Add read accessors** — methods like `bars()`, `vf_bars()`, `children()`, `decodes()`,
+   `has_parent()`, `bridge_io_alignment()`, `location()` (already exists), `is_bridge()` (already exists).
 
-3. **Resource programming** (`resource/programming.rs`)
-   - `program_resource()` — top-down address assignment from root bridge apertures
-   - `program_bar()` — write base address into device BAR registers
-   - `program_ppb_aperture()` — set PCI-PCI bridge IO/Mem/PMem windows
-   - `program_upstream_bridge_for_rom()` — temporary aperture for ROM access
-   - Submit resource requests via Host Bridge Resource Allocation Protocol
+3. **Add write accessors** — methods like `add_child()`, `set_allocated()`,
+   `set_bar_base_address(index, addr)`, `set_vf_bar_base_address(index, addr)`.
+
+4. **Add test-only setters** — `#[cfg(test)]` methods for fields only written in tests
+   (e.g., `set_decodes()`, `set_pci_bar()`).
+
+5. **Make fields private** — change `pub` to `pub(crate)` or private, updating all external
+   access to use the new methods.
+
+6. **Verify** — `cargo build`, `cargo test`, `cargo clippy` all pass with 0 warnings.
+
+**Notes:**
+- The `Default` impl must still work for test dummy creation.
+- `PciIoDeviceRef` (`Rc<RefCell<PciIoDevice>>`) remains the ownership pattern — accessors operate
+  on `&self` / `&mut self` inside the `borrow()` / `borrow_mut()` calls.
+- `PciBar` fields (`base_address`, `offset`, `bar_type`, etc.) may also benefit from encapsulation
+  but can be deferred — they are simple data structs with no invariants.
+
+### Phase 5b: TPL Protection for BAR Probing
+
+**Goal:** Add TPL raise/restore around the BAR probe critical section in `scan_bars`/`probe_bar`
+to prevent timer interrupts from accessing a device while its BARs are temporarily invalid.
+
+**Status:** Not started
+
+**Motivation:** `probe_bar()` writes `0xFFFFFFFF` to a BAR, reads back the sizing mask, then
+restores the original value. If a timer interrupt fires mid-probe, an interrupt handler could
+access the device through a now-invalid BAR, causing a machine check or data corruption. The C
+reference wraps this in `RaiseTPL(TPL_HIGH_LEVEL)` / `RestoreTPL()`. The Rust code currently
+has no TPL protection.
+
+**Approach:** Use the existing `BootServices::raise_tpl_guarded(Tpl::NOTIFY)` RAII guard from
+`sdk/patina/src/boot_services/tpl.rs`. Pass `&dyn BootServices` down the call chain rather than
+coupling TPL to `PciConfigAccess`.
+
+**Tasks:**
+
+1. **Add `BootServices` parameter to `probe_bar()`** — wrap the write-all-ones / read-back /
+   restore sequence in `bs.raise_tpl_guarded(Tpl::NOTIFY)`.
+
+2. **Thread `BootServices` through callers** — `scan_bars()` and its callers in `bus_scan.rs`
+   need the extra parameter. `PciBusComponent` already holds `StandardBootServices`.
+
+3. **Update tests** — test mocks for `PciConfigAccess` don't need real TPL; add a mock or
+   no-op `BootServices` implementation for test contexts.
+
+4. **Verify** — `cargo build`, `cargo test`, `cargo clippy` all pass.
+
+**Notes:**
+- The C reference uses `TPL_HIGH_LEVEL`; `Tpl::NOTIFY` is the Patina SDK's equivalent
+  highest level that blocks timer interrupts. Verify this mapping is correct.
+- The RAII `TplGuard` ensures TPL is restored even on early return — no cleanup risk.
+- Programming path does NOT need TPL (device decode is already disabled at that point).
 
 ### Phase 6: PCI I/O Protocol Production
 
@@ -609,8 +716,8 @@ This is a very large conversion (~19K lines of C). Each phase produces a compila
 increment. **After completing each phase, stop and wait for user review before starting the next
 phase.**
 
-- **Phases 1-3:** Minimal compilable component that installs driver binding → **review**
-- **Phase 4:** Enumeration discovers devices (no resource allocation yet) → **review**
+- **Phases 1-3:** Minimal compilable component that installs driver binding → **reviewed**
+- **Phase 4:** Enumeration discovers devices (no resource allocation yet) → **reviewed**
 - **Phase 5:** Resources allocated and BARs programmed → **review**
 - **Phase 6:** Full PCI I/O Protocol available to downstream drivers → **review**
 - **Phase 7:** Hot plug, option ROM, and other features added incrementally → **review**
@@ -624,9 +731,9 @@ phase.**
 |---------------|-------|-------------|-------|
 | `PciBus.c` | 461 | `component.rs`, `driver_binding.rs` | 3 |
 | `PciBus.h` | 1,135 | `pci_device.rs`, `pci_device/bar.rs` | 2 |
-| `PciEnumerator.c` | 2,248 | `enumerator/mod.rs` | 4 |
-| `PciEnumeratorSupport.c` | 3,114 | `enumerator/bus_scan.rs`, `bar_scan.rs`, `capabilities.rs` | 4 |
-| `PciResourceSupport.c` | 2,395 | `resource/mod.rs`, `aperture.rs`, `programming.rs` | 5 |
+| `PciEnumerator.c` | 2,248 | `bus_scan.rs` | 4 |
+| `PciEnumeratorSupport.c` | 3,114 | `bus_scan.rs`, `pci_device/device.rs`, `pci_device/config_access.rs` | 4 |
+| `PciResourceSupport.c` | 2,395 | `resource/allocation.rs`, `resource/resource_node.rs` | 5 |
 | `PciIo.c` | 2,152 | `pci_io/*.rs` | 6 |
 | `PciLib.c` | 1,939 | `driver_binding.rs` (Start/Stop helpers), `pci_device.rs` | 3, 8 |
 | `PciDeviceSupport.c` | 1,151 | `driver_binding.rs` (register/deregister) | 8 |

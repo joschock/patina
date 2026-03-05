@@ -137,6 +137,30 @@ pub struct PciType01 {
     pub bridge: PciBridgeControlRegion,
 }
 
+/// PCI-to-PCI bridge (Type 01h) aperture register offsets in config space.
+pub mod ppb_regs {
+    /// I/O base (lower 8 bits).
+    pub const IO_BASE: u32 = 0x1C;
+    /// I/O limit (lower 8 bits).
+    pub const IO_LIMIT: u32 = 0x1D;
+    /// Non-prefetchable memory base (upper 16 bits of 32-bit address).
+    pub const MEM_BASE: u32 = 0x20;
+    /// Non-prefetchable memory limit (upper 16 bits of 32-bit address).
+    pub const MEM_LIMIT: u32 = 0x22;
+    /// Prefetchable memory base (upper 16 bits).
+    pub const PMEM_BASE: u32 = 0x24;
+    /// Prefetchable memory limit (upper 16 bits).
+    pub const PMEM_LIMIT: u32 = 0x26;
+    /// Prefetchable base upper 32 bits.
+    pub const PMEM_BASE_UPPER: u32 = 0x28;
+    /// Prefetchable limit upper 32 bits.
+    pub const PMEM_LIMIT_UPPER: u32 = 0x2C;
+    /// I/O base upper 16 bits.
+    pub const IO_BASE_UPPER: u32 = 0x30;
+    /// I/O limit upper 16 bits.
+    pub const IO_LIMIT_UPPER: u32 = 0x32;
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
