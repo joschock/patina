@@ -2,10 +2,10 @@
 
 ## Current Progress
 
-> **Last updated:** 2026-03-05 (Session 5 — Phase 5 review refactors complete)
+> **Last updated:** 2026-03-05 (Session 5 — Phase 5 review complete, ready for Phase 5a)
 >
 > **Build:** `cargo build -p pci_bus` ✅ | `cargo test -p pci_bus` ✅ (24 tests passing)
-> | `cargo clippy -p pci_bus` ✅ (0 warnings)
+> | `cargo make clippy` ✅ (0 warnings)
 >
 > | Phase | Status | Notes |
 > |-------|--------|-------|
@@ -22,7 +22,7 @@
 > | 9. Testing | ⬜ Not started | 24 tests exist from Phases 1-5 |
 > | 10. Integration & Docs | ⬜ Not started | |
 >
-> **Next steps:** Phase 5a (PciIoDevice encapsulation), then Phase 6 (PCI I/O Protocol).
+> **Next steps:** Phase 5a (PciIoDevice encapsulation), then 5b (TPL), then Phase 6 (PCI I/O Protocol).
 > Phase 3 (driver binding) is intentionally left as a skeleton — Start/Stop bodies and the
 > Supported device path check will be completed as part of Phases 6 and 8.
 
@@ -391,6 +391,8 @@ components/pci_bus/
 | `ResourcePools::has_requests()` | method | Returns true if any pool has child nodes |
 | `ResourcePools::add_device_resources(dev)` | method | Extracts BAR requirements into appropriate pools |
 | `ResourcePools::degrade(bridge)` | method | Applies resource degradation based on bridge decode caps |
+| `ResourcePools::merge_child_pools(child)` | method | Merges non-empty child bridge pools into parent |
+| `ResourcePools::calculate_all_apertures()` | method | Calculates apertures for all five pools |
 | `create_resource_map(bridge, pools)` | free fn | Recursively builds resource tree for a bridge hierarchy |
 | `drain_and_retype(dst, src)` | free fn | Drains children between pools, retyping to dst |
 | `drain_preserving_type(dst, src)` | free fn | Drains children between pools, preserving type |
@@ -405,6 +407,21 @@ components/pci_bus/
 
 **Bridge decode flags** are in `pci_device::device::bridge_decode` module:
 `MEM64`, `PMEM64`, `PMEM32`, `PMEM_MEM_COMBINE`
+
+**Cross-cutting improvements (Session 5 review):**
+
+- **Error handling consistency:** All match arms that discard unexpected variants now use
+  `log::warn!` + `debug_assert!(false, ...)` pattern consistently across `resource_node.rs`,
+  `allocation.rs`. No silent `_ => {}` arms remain outside of test code.
+- **FFI error checking:** `RootBridgeIoAccess` in `config_access.rs` now checks `efi::Status`
+  return values from all PCI Root Bridge I/O Protocol read/write calls and logs warnings on error.
+- **Diagnostic logging:** `bus_scan.rs` logs device discovery (`log::debug!`) and bridge
+  secondary bus scanning. Logs `log::warn!` for invalid secondary bus numbers. `device.rs`
+  `scan_bars()` logs BAR parse errors instead of silently skipping.
+- **DRY refactoring:** Extracted `ResourcePools::merge_child_pools()` and
+  `ResourcePools::calculate_all_apertures()` to eliminate five identical if-calculate-push blocks.
+- **Borrow efficiency:** `program_bar`/`program_vf_bar` consolidated from 3 separate
+  `borrow_mut()` calls to a single borrow that sets both `allocated` and `base_address`.
 
 ### Phase 5a: PciIoDevice Encapsulation
 
