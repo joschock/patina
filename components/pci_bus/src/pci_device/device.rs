@@ -68,107 +68,108 @@ pub mod bridge_decode {
 
 /// Per-PCI-device state used throughout enumeration, resource allocation,
 /// and PCI I/O Protocol production.
+#[allow(dead_code)]
 pub struct PciIoDevice {
     // -- Handle & identity --
     /// UEFI handle for this device (set during registration).
-    pub handle: efi::Handle,
+    handle: efi::Handle,
     /// Bus number.
-    pub bus_number: u8,
+    bus_number: u8,
     /// Device number (0-31).
-    pub device_number: u8,
+    device_number: u8,
     /// Function number (0-7).
-    pub function_number: u8,
+    function_number: u8,
     /// PCI Type 00h configuration space header, read during enumeration.
-    pub pci: PciType00,
+    pci: PciType00,
 
     // -- Protocols --
     /// Device path protocol for this device.
-    pub device_path: *mut r_efi::protocols::device_path::Protocol,
+    device_path: *mut r_efi::protocols::device_path::Protocol,
     /// Pointer to the PCI Root Bridge I/O Protocol for the root bridge
     /// this device is behind.
-    pub pci_root_bridge_io: *mut PciRootBridgeIoProtocol,
+    pci_root_bridge_io: *mut PciRootBridgeIoProtocol,
 
     // -- BARs --
     /// Decoded BARs for this device.
-    pub pci_bar: Vec<PciBar>,
+    pci_bar: Vec<PciBar>,
 
     // -- Hierarchy --
     /// Parent bridge (None for root bridge children).
-    pub parent: Option<alloc::rc::Weak<RefCell<PciIoDevice>>>,
+    parent: Option<alloc::rc::Weak<RefCell<PciIoDevice>>>,
     /// Child devices (populated for bridges).
-    pub child_list: Vec<PciIoDeviceRef>,
+    child_list: Vec<PciIoDeviceRef>,
 
     // -- Lifecycle flags --
     /// True if a UEFI handle has been created for this device.
-    pub registered: bool,
+    registered: bool,
     /// True if resources have been allocated for this device.
-    pub allocated: bool,
+    allocated: bool,
 
     // -- Attributes --
     /// Currently enabled attributes.
-    pub attributes: u64,
+    attributes: u64,
     /// Attributes supported by this device.
-    pub supports: u64,
+    supports: u64,
     /// Bridge decode capabilities (combination of `bridge_decode` flags).
-    pub decodes: u32,
+    decodes: u32,
 
     // -- Option ROM --
     /// True if the ROM image originates from the device's expansion ROM BAR.
-    pub embedded_rom: bool,
+    embedded_rom: bool,
     /// Size of the option ROM image in bytes.
-    pub rom_size: u32,
+    rom_size: u32,
     /// True if all option ROM images have been processed.
-    pub all_op_rom_processed: bool,
+    all_op_rom_processed: bool,
     /// True if an EFI driver was found in the option ROM.
-    pub bus_override: bool,
+    bus_override: bool,
     /// If true, skip option ROM processing for this device.
-    pub ignore_rom: bool,
+    ignore_rom: bool,
 
     // -- PCIe / capability offsets --
     /// True if this device has PCIe capabilities.
-    pub is_pci_exp: bool,
+    is_pci_exp: bool,
     /// True if ARI (Alternative Routing-ID Interpretation) is enabled.
-    pub is_ari_enabled: bool,
+    is_ari_enabled: bool,
     /// Offset of the PCIe capability structure in config space.
-    pub pci_express_capability_offset: u8,
+    pci_express_capability_offset: u8,
     /// Offset of the ARI extended capability (0 if not present).
-    pub ari_capability_offset: u32,
+    ari_capability_offset: u32,
     /// Offset of the SR-IOV extended capability (0 if not present).
-    pub sriov_capability_offset: u32,
+    sriov_capability_offset: u32,
     /// Offset of the MR-IOV extended capability (0 if not present).
-    pub mriov_capability_offset: u32,
+    mriov_capability_offset: u32,
 
     // -- SR-IOV --
     /// Virtual Function BARs (for SR-IOV capable devices).
-    pub vf_pci_bar: Vec<PciBar>,
+    vf_pci_bar: Vec<PciBar>,
     /// System page size for SR-IOV.
-    pub system_page_size: u32,
+    system_page_size: u32,
     /// Initial number of Virtual Functions.
-    pub initial_vfs: u16,
+    initial_vfs: u16,
     /// Number of bus numbers reserved for this device's VFs.
-    pub reserved_bus_num: u16,
+    reserved_bus_num: u16,
 
     // -- Bridge-specific --
     /// Non-standard I/O window alignment for PCI-PCI bridges (default 4K).
-    pub bridge_io_alignment: u16,
+    bridge_io_alignment: u16,
 
     // -- Resizable BAR --
     /// Offset of the Resizable BAR extended capability (0 if not present).
-    pub resizable_bar_offset: u32,
+    resizable_bar_offset: u32,
     /// Number of resizable BARs.
-    pub resizable_bar_number: u32,
+    resizable_bar_number: u32,
 
     // -- PCIe Max Payload --
     /// Maximum payload size setting.
-    pub max_payload_size: u8,
+    max_payload_size: u8,
 
     // -- Hot plug --
     /// Resource padding descriptors for hot-pluggable slots.
-    pub resource_padding_descriptors: *mut core::ffi::c_void,
+    resource_padding_descriptors: *mut core::ffi::c_void,
     /// Padding attributes for hot plug resource reservation.
-    pub padding_attributes: u64,
+    padding_attributes: u64,
     /// Bus number range descriptors for PCI root bridges.
-    pub bus_number_ranges: *mut core::ffi::c_void,
+    bus_number_ranges: *mut core::ffi::c_void,
 }
 
 impl PciIoDevice {
@@ -205,6 +206,79 @@ impl PciIoDevice {
     /// Returns true if this device is a PCI-PCI bridge (header type 01h).
     pub fn is_bridge(&self) -> bool {
         (self.pci.hdr.header_type & 0x7F) == PCI_HEADER_TYPE_BRIDGE
+    }
+
+    // -- Read accessors --
+
+    /// Returns a slice of this device's decoded BARs.
+    pub fn bars(&self) -> &[PciBar] {
+        &self.pci_bar
+    }
+
+    /// Returns a slice of this device's SR-IOV Virtual Function BARs.
+    pub fn vf_bars(&self) -> &[PciBar] {
+        &self.vf_pci_bar
+    }
+
+    /// Returns a slice of this device's child devices.
+    pub fn children(&self) -> &[PciIoDeviceRef] {
+        &self.child_list
+    }
+
+    /// Returns true if this device has a parent bridge.
+    pub fn has_parent(&self) -> bool {
+        self.parent.is_some()
+    }
+
+    /// Returns the bridge decode capability flags.
+    pub fn decodes(&self) -> u32 {
+        self.decodes
+    }
+
+    /// Returns the bridge I/O window alignment.
+    pub fn bridge_io_alignment(&self) -> u16 {
+        self.bridge_io_alignment
+    }
+
+    /// Returns the PCI config header read during enumeration.
+    pub fn pci_header(&self) -> &PciType00 {
+        &self.pci
+    }
+
+    // -- Write accessors --
+
+    /// Adds a child device to this bridge's child list.
+    pub fn add_child(&mut self, child: PciIoDeviceRef) {
+        self.child_list.push(child);
+    }
+
+    /// Clones the child device list (used for iteration while mutating).
+    pub fn clone_children(&self) -> Vec<PciIoDeviceRef> {
+        self.child_list.clone()
+    }
+
+    /// Marks this device as having resources allocated.
+    pub fn set_allocated(&mut self) {
+        self.allocated = true;
+    }
+
+    /// Sets the base address of a BAR after resource programming.
+    pub fn set_bar_base_address(&mut self, index: usize, address: u64) {
+        if let Some(bar) = self.pci_bar.get_mut(index) {
+            bar.base_address = address;
+        }
+    }
+
+    /// Sets the base address of a VF BAR after resource programming.
+    pub fn set_vf_bar_base_address(&mut self, index: usize, address: u64) {
+        if let Some(bar) = self.vf_pci_bar.get_mut(index) {
+            bar.base_address = address;
+        }
+    }
+
+    /// Sets the bridge decode capability flags.
+    pub fn set_decodes(&mut self, decodes: u32) {
+        self.decodes = decodes;
     }
 
     // -- BAR scanning (private) --
@@ -387,6 +461,15 @@ impl Default for PciIoDevice {
             padding_attributes: 0,
             bus_number_ranges: core::ptr::null_mut(),
         }
+    }
+}
+
+// Test-only setters for fields that are only written in test code.
+#[cfg(test)]
+impl PciIoDevice {
+    /// Sets the BAR list (test only).
+    pub fn set_pci_bar(&mut self, bars: Vec<PciBar>) {
+        self.pci_bar = bars;
     }
 }
 

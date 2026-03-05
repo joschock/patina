@@ -55,7 +55,7 @@ pub fn scan_bus(config: &dyn PciConfigAccess, parent: &PciIoDeviceRef, start_bus
                 }
             }
 
-            parent.borrow_mut().child_list.push(pci_dev);
+            parent.borrow_mut().add_child(pci_dev);
 
             if function == 0 && (pci.hdr.header_type & PCI_HEADER_TYPE_MULTI_FUNC) == 0 {
                 break;

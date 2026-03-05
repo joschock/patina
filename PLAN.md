@@ -460,6 +460,9 @@ and will become a maintenance burden as more code consumes the struct in Phase 6
   on `&self` / `&mut self` inside the `borrow()` / `borrow_mut()` calls.
 - `PciBar` fields (`base_address`, `offset`, `bar_type`, etc.) may also benefit from encapsulation
   but can be deferred — they are simple data structs with no invariants.
+- `PciIoDevice` currently has `#[allow(dead_code)]` because many fields are populated during
+  enumeration but not yet read by later phases. Remove this marker once Phase 6+ adds accessors
+  and consumers for the remaining fields (handle, device_path, attributes, ROM fields, etc.).
 
 ### Phase 5b: TPL Protection for BAR Probing
 

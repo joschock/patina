@@ -201,12 +201,12 @@ impl PciResourceNode {
         let dev = self.pci_dev.borrow();
         let loc = dev.location();
 
-        if bar_index >= dev.pci_bar.len() {
+        if bar_index >= dev.bars().len() {
             return;
         }
 
-        let bar_offset = dev.pci_bar[bar_index].offset as u32;
-        let bar_type = dev.pci_bar[bar_index].bar_type;
+        let bar_offset = dev.bars()[bar_index].offset as u32;
+        let bar_type = dev.bars()[bar_index].bar_type;
         drop(dev);
 
         match bar_type {
@@ -225,8 +225,8 @@ impl PciResourceNode {
         }
 
         let mut dev = self.pci_dev.borrow_mut();
-        dev.allocated = true;
-        dev.pci_bar[bar_index].base_address = address;
+        dev.set_allocated();
+        dev.set_bar_base_address(bar_index, address);
     }
 
     /// Programs a VF (Virtual Function) BAR register.
@@ -244,12 +244,12 @@ impl PciResourceNode {
         let dev = self.pci_dev.borrow();
         let loc = dev.location();
 
-        if bar_index >= dev.vf_pci_bar.len() {
+        if bar_index >= dev.vf_bars().len() {
             return;
         }
 
-        let bar_offset = dev.vf_pci_bar[bar_index].offset as u32;
-        let bar_type = dev.vf_pci_bar[bar_index].bar_type;
+        let bar_offset = dev.vf_bars()[bar_index].offset as u32;
+        let bar_type = dev.vf_bars()[bar_index].bar_type;
         drop(dev);
 
         match bar_type {
@@ -268,8 +268,8 @@ impl PciResourceNode {
         }
 
         let mut dev = self.pci_dev.borrow_mut();
-        dev.allocated = true;
-        dev.vf_pci_bar[bar_index].base_address = address;
+        dev.set_allocated();
+        dev.set_vf_bar_base_address(bar_index, address);
     }
 
     /// Programs PCI-PCI bridge aperture registers.
@@ -287,7 +287,7 @@ impl PciResourceNode {
         let loc = dev.location();
         drop(dev);
 
-        self.pci_dev.borrow_mut().allocated = true;
+        self.pci_dev.borrow_mut().set_allocated();
 
         match self.kind {
             ResourceKind::BridgeIo => {

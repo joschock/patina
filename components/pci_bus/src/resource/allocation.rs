@@ -37,7 +37,7 @@ impl ResourcePools {
     pub fn new(bridge: PciIoDeviceRef) -> Self {
         debug_assert!(bridge.borrow().is_bridge(), "ResourcePools::new() requires a bridge device");
 
-        let io_alignment = bridge.borrow().bridge_io_alignment as u64;
+        let io_alignment = bridge.borrow().bridge_io_alignment() as u64;
         let io_alignment = if io_alignment == 0 { 0xFFF } else { io_alignment };
 
         Self {
@@ -123,7 +123,7 @@ impl ResourcePools {
     pub fn add_device_resources(&mut self, dev: &PciIoDeviceRef) {
         let dev_ref = dev.borrow();
 
-        for (index, bar) in dev_ref.pci_bar.iter().enumerate() {
+        for (index, bar) in dev_ref.bars().iter().enumerate() {
             let node = PciResourceNode::new(
                 dev.clone(),
                 bar.length,
@@ -156,7 +156,7 @@ impl ResourcePools {
         }
 
         // SR-IOV Virtual Function BARs
-        for (index, bar) in dev_ref.vf_pci_bar.iter().enumerate() {
+        for (index, bar) in dev_ref.vf_bars().iter().enumerate() {
             let node = PciResourceNode::new(
                 dev.clone(),
                 bar.length,
@@ -207,8 +207,8 @@ impl ResourcePools {
 
         debug_assert!(bridge.borrow().is_bridge(), "degrade() requires a bridge device");
 
-        let decodes = bridge.borrow().decodes;
-        let has_parent = bridge.borrow().parent.is_some();
+        let decodes = bridge.borrow().decodes();
+        let has_parent = bridge.borrow().has_parent();
 
         // If bridge doesn't support MEM64, degrade to MEM32
         if (decodes & bridge_decode::MEM64) == 0 {
@@ -244,7 +244,7 @@ impl ResourcePools {
 /// For each child device, extracts BAR requirements into the pools. For child
 /// bridges, recursively builds sub-trees and inserts bridge aperture nodes.
 pub fn create_resource_map(bridge: &PciIoDeviceRef, pools: &mut ResourcePools) {
-    let children: Vec<PciIoDeviceRef> = bridge.borrow().child_list.clone();
+    let children: Vec<PciIoDeviceRef> = bridge.borrow().clone_children();
 
     for child in &children {
         pools.add_device_resources(child);
@@ -295,7 +295,8 @@ mod test {
     }
 
     fn dev_with_bars(bars: Vec<PciBar>) -> PciIoDeviceRef {
-        let dev = PciIoDevice { pci_bar: bars, ..Default::default() };
+        let mut dev = PciIoDevice::default();
+        dev.set_pci_bar(bars);
         Rc::new(RefCell::new(dev))
     }
 
@@ -451,7 +452,7 @@ mod test {
     fn test_degrade_no_mem64() {
         let bridge_dev = dummy_dev();
         // Bridge with no MEM64/PMEM64 decode support
-        bridge_dev.borrow_mut().decodes = 0;
+        bridge_dev.borrow_mut().set_decodes(0);
         let mut pools = ResourcePools::new(bridge_dev.clone());
 
         let dev = dev_with_bars(vec![PciBar {
