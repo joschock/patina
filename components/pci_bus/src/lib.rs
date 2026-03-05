@@ -11,6 +11,7 @@
 
 extern crate alloc;
 
+pub mod bus_scan;
 pub mod component;
 pub mod pci_device;
 pub mod protocols;

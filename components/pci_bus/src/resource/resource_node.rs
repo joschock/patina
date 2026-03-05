@@ -31,8 +31,6 @@ pub enum PciResourceUsage {
 /// aggregate their children to compute the aperture the bridge must decode.
 /// The tree is built bottom-up during enumeration and programmed top-down
 /// during resource allocation.
-///
-
 pub struct PciResourceNode {
     /// The device that owns this resource requirement.
     pub pci_dev: PciIoDeviceRef,
@@ -102,7 +100,7 @@ mod test {
     use crate::pci_device::PciIoDevice;
 
     fn dummy_dev() -> PciIoDeviceRef {
-        Rc::new(RefCell::new(PciIoDevice::new()))
+        Rc::new(RefCell::new(PciIoDevice::default()))
     }
 
     #[test]

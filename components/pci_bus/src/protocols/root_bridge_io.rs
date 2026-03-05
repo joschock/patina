@@ -67,24 +67,6 @@ pub enum Operation {
     Maximum,
 }
 
-/// PCI address for Root Bridge I/O Pci.Read/Pci.Write operations.
-///
-/// Matches `EFI_PCI_ROOT_BRIDGE_IO_PROTOCOL_PCI_ADDRESS`.
-#[repr(C)]
-#[derive(Debug, Clone, Copy, Default)]
-pub struct PciAddress {
-    /// Register number (bits 7:0 of config offset).
-    pub register: u8,
-    /// Function number (0-7).
-    pub function: u8,
-    /// Device number (0-31).
-    pub device: u8,
-    /// Bus number (0-255).
-    pub bus: u8,
-    /// Extended register number (bits 11:8 of config offset, 0 for standard space).
-    pub extended_register: u32,
-}
-
 /// Function pointer type for PollMem/PollIo operations.
 pub type PollIoMem = unsafe extern "efiapi" fn(
     this: *mut PciRootBridgeIoProtocol,
@@ -266,7 +248,6 @@ pub const PCI_ATTRIBUTE_VGA_IO_16: u64 = 0x40000;
 #[cfg(test)]
 mod test {
     use super::*;
-    use core::mem;
 
     #[test]
     fn test_root_bridge_io_protocol_guid() {
@@ -290,10 +271,5 @@ mod test {
         assert_eq!(Operation::BusMasterRead as u32, 0);
         assert_eq!(Operation::BusMasterCommonBuffer64 as u32, 5);
         assert_eq!(Operation::Maximum as u32, 6);
-    }
-
-    #[test]
-    fn test_pci_address_layout() {
-        assert_eq!(mem::size_of::<PciAddress>(), 8);
     }
 }

@@ -2,7 +2,12 @@
 //!
 //! Defines `#[repr(C)]` structs matching the PCI Local Bus Specification
 //! standard header layouts (Type 00h for endpoints, Type 01h for bridges).
-//!
+
+/// Header type value for PCI-PCI bridges (Type 01h).
+pub const PCI_HEADER_TYPE_BRIDGE: u8 = 0x01;
+
+/// Header type bit indicating a multi-function device.
+pub const PCI_HEADER_TYPE_MULTI_FUNC: u8 = 0x80;
 
 /// Device-independent portion of the PCI configuration space header (first 16 bytes).
 ///
@@ -33,8 +38,6 @@ pub struct PciDeviceIndependentRegion {
 }
 
 /// Type 00h device-specific portion of PCI configuration space.
-///
-
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct PciDeviceHeaderTypeRegion {
@@ -65,8 +68,6 @@ pub struct PciDeviceHeaderTypeRegion {
 }
 
 /// PCI Type 00h (endpoint) configuration space header.
-///
-
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct PciType00 {
@@ -77,8 +78,6 @@ pub struct PciType00 {
 }
 
 /// PCI-PCI Bridge (Type 01h) specific portion of configuration space.
-///
-
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct PciBridgeControlRegion {
@@ -129,8 +128,6 @@ pub struct PciBridgeControlRegion {
 }
 
 /// PCI Type 01h (PCI-to-PCI bridge) configuration space header.
-///
-
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct PciType01 {

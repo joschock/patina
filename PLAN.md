@@ -2,27 +2,27 @@
 
 ## Current Progress
 
-> **Last updated:** 2026-03-04 (Session 2)
+> **Last updated:** 2026-03-05 (Session 3 — Phase 4 review & cleanup)
 >
-> **Build:** `cargo build -p pci_bus` ✅ | `cargo test -p pci_bus` ✅ (12 tests passing)
+> **Build:** `cargo build -p pci_bus` ✅ | `cargo test -p pci_bus` ✅ (16 tests passing)
+> | `cargo clippy -p pci_bus` ✅ (0 warnings)
 >
 > | Phase | Status | Notes |
 > |-------|--------|-------|
-> | 1. Scaffolding & Protocol FFI | 🔶 Partial | Crate created, root_bridge_io done. 7 more protocols to add as needed. |
-> | 2. Core Data Structures | ✅ Done | PciBar, PciIoDevice, PciResourceNode, PCI config headers. |
+> | 1. Scaffolding & Protocol FFI | 🔶 Partial | root_bridge_io + host_bridge_alloc done. Remaining protocols added as needed. |
+> | 2. Core Data Structures | ✅ Done | PciBar, PciIoDevice (Rc/RefCell), PciResourceNode, PCI config headers. |
 > | 3. Component & Driver Binding | 🔶 Skeleton | Entry point + driver binding compile with stub Start/Stop. |
-> | 4. PCI Enumeration | ⬜ Not started | |
+> | 4. PCI Enumeration | ✅ Done | BAR scanning, bus scanning, capability parsing. Extensively reviewed and refactored. |
 > | 5. Resource Allocation | ⬜ Not started | |
 > | 6. PCI I/O Protocol | ⬜ Not started | |
 > | 7. Supporting Features | ⬜ Not started | |
 > | 8. Device Lifecycle | ⬜ Not started | |
-> | 9. Testing | ⬜ Not started | 12 tests exist from Phases 1, 2 & 3 |
+> | 9. Testing | ⬜ Not started | 16 tests exist from Phases 1-4 |
 > | 10. Integration & Docs | ⬜ Not started | |
 >
-> **Next steps:** Phase 4 (PCI enumeration: bus scanning, BAR scanning, capability parsing),
-> which also requires the Host Bridge Resource Allocation protocol FFI definition.
+> **Next steps:** Phase 5 (resource allocation: tree construction, aperture calculation, BAR programming).
 > Phase 3 (driver binding) is intentionally left as a skeleton — Start/Stop bodies and the
-> Supported device path check will be completed as part of Phases 4, 5, and 8.
+> Supported device path check will be completed as part of Phases 5 and 8.
 
 ---
 
@@ -127,44 +127,29 @@ components/pci_bus/
 ├── Cargo.toml
 ├── README.md
 └── src/
-    ├── lib.rs                     # Component entry point
-    ├── component.rs               # #[component] impl + driver binding install
-    ├── driver_binding.rs          # DriverBinding trait impl (Supported/Start/Stop)
-    ├── pci_device.rs              # PciIoDevice struct (Rust equivalent of PCI_IO_DEVICE)
+    ├── lib.rs                     # Crate root with module declarations
+    ├── component.rs               # #[component] impl + driver binding
+    ├── bus_scan.rs                 # Recursive PCI bus scanning
     ├── pci_device/
-    │   └── bar.rs                 # PciBar definitions
-    ├── pci_io/
+    │   ├── mod.rs                 # Re-exports for PciIoDevice, PciBar, etc.
+    │   ├── device.rs              # PciIoDevice struct + BAR scanning + capability detection
+    │   ├── bar.rs                 # PciBar struct, PciBarType enum, BAR constructors
+    │   ├── config_access.rs       # PciConfigAccess trait, PciLocation, RootBridgeIoAccess
+    │   └── pci_config.rs          # PCI config header structs (PciType00/PciType01)
+    ├── resource/
+    │   ├── mod.rs                 # Re-exports
+    │   └── resource_node.rs       # PciResourceNode tree data structure
+    ├── protocols/
+    │   ├── mod.rs                 # Re-exports
+    │   ├── root_bridge_io.rs      # PCI Root Bridge I/O Protocol FFI
+    │   └── host_bridge_alloc.rs   # Host Bridge Resource Allocation FFI
+    ├── pci_io/                    # (Phase 6 — not yet created)
     │   ├── mod.rs                 # PCI I/O Protocol implementation
     │   ├── config.rs              # Config space read/write
     │   ├── mem_io.rs              # Memory and I/O space operations
     │   ├── dma.rs                 # Map/Unmap/AllocateBuffer/FreeBuffer
     │   └── attributes.rs          # Attribute get/set operations
-    ├── enumerator/
-    │   ├── mod.rs                 # Top-level enumeration orchestration
-    │   ├── bus_scan.rs            # Bus/device/function scanning
-    │   ├── bar_scan.rs            # BAR detection and sizing
-    │   └── capabilities.rs        # PCIe/ARI/SR-IOV capability parsing
-    ├── resource/
-    │   ├── mod.rs                 # Resource allocation orchestration
-    │   ├── resource_node.rs       # Resource tree data structures
-    │   ├── aperture.rs            # Bridge aperture calculation
-    │   └── programming.rs         # BAR/bridge register programming
-    ├── protocols/
-    │   ├── mod.rs                 # Re-exports
-    │   ├── root_bridge_io.rs      # PCI Root Bridge I/O Protocol FFI
-    │   ├── host_bridge_alloc.rs   # Host Bridge Resource Allocation FFI
-    │   ├── hot_plug_init.rs       # PCI Hot Plug Init Protocol FFI
-    │   ├── pci_platform.rs        # PCI Platform/Override Protocol FFI
-    │   ├── incompatible.rs        # Incompatible PCI Device Support FFI
-    │   ├── enumeration_complete.rs # PCI Enumeration Complete Protocol
-    │   └── device_security.rs     # Device Security Protocol FFI
-    ├── hot_plug.rs                # Hot plug support logic
-    ├── option_rom.rs              # Option ROM loading/processing
-    ├── command.rs                 # PCI command register helpers
-    ├── power_management.rs        # Power state management
-    ├── driver_override.rs         # Bus-specific driver override
-    ├── component_name.rs          # Component Name Protocol support
-    └── rom_table.rs               # ROM table management
+    └── (future modules)           # hot_plug.rs, option_rom.rs, etc. (Phase 7+)
 ```
 
 ---
@@ -186,10 +171,12 @@ components/pci_bus/
 
 2. **Define PCI Root Bridge I/O Protocol** (`protocols/root_bridge_io.rs`) ✅
    - `#[repr(C)]` struct matching `EFI_PCI_ROOT_BRIDGE_IO_PROTOCOL`
-   - All function pointer types, Width/Operation enums, PciAddress struct, Access struct
+   - All function pointer types, Width/Operation enums, Access struct
    - Attribute constants (ISA, VGA, memory, DAC, etc.)
    - `unsafe impl ProtocolInterface` with GUID `2f707ebb-4a1a-11d4-...`
-   - Tests for GUID, enum values, and struct layout
+   - Tests for GUID and enum values
+   - Note: `PciAddress` struct was removed (unused; `PciLocation` + `encode_pci_address`
+     in `config_access.rs` serve this purpose). Can be re-added if needed for Phase 6.
 
 3. **Define Host Bridge Resource Allocation Protocol** (`protocols/host_bridge_alloc.rs`)
    - `#[repr(C)]` struct matching `EFI_PCI_HOST_BRIDGE_RESOURCE_ALLOCATION_PROTOCOL`
@@ -216,31 +203,40 @@ components/pci_bus/
 **Tasks:**
 
 1. **PciBar** (`pci_device/bar.rs`)
-   - Enum `PciBarType { Unknown, Io16, Io32, Mem32, PMem32, Mem64, PMem64, OpRom, Io, Mem, MaxType }`
-     (11 variants matching C enum order — `Unknown` = 0, `MaxType` = 10)
-   - Struct `PciBar { base_address: u64, length: u64, alignment: u64, bar_type: PciBarType,
-     bar_type_fixed: bool, offset: u16 }`
-   - Constant `PCI_MAX_BAR: usize = 6` (standard BARs only; ROM BAR handled separately)
-   - Reference: `PCI_BAR` and `PCI_BAR_TYPE` in `PciBus.h`
+   - Enum `PciBarType { Unknown, Io16, Io32, Mem32, PMem32, Mem64, PMem64, OpRom, Io, Mem }`
+     (10 variants matching C enum order, minus `MaxType` sentinel which has no Rust purpose;
+     `OpRom` retained for FFI ordinal stability)
+   - Struct `PciBar { base_address, length, alignment, bar_type, bar_type_fixed, offset }`
+     with `#[derive(Default)]`
+   - `PciBarType::is_64bit()` — returns true for Mem64/PMem64
+   - `PciBar::next_offset()` — computes next BAR register offset (4 or 8 bytes)
+   - `PciBar::from_io()`, `from_mem32()`, `from_mem64()` — constructors that parse sizing
+     masks and return `Result<Self, InvalidBarError>` (zero-length = error)
+   - `InvalidBarError { offset, sizing_mask }` for malformed BARs
+   - `pci_bar` and `vf_pci_bar` fields on `PciIoDevice` are `Vec<PciBar>` (not fixed-size arrays)
 
 2. **PciIoDevice** (`pci_device/device.rs`)
    - Primary struct with device state fields
    - `PciIoDeviceRef` type alias: `Rc<RefCell<PciIoDevice>>` for shared mutable ownership
-   - Device identity: bus/device/function, PCI config header (custom `PciType00`/`PciType01`
-     in `pci_device/pci_config.rs`)
-   - Resource management: `pci_bar: [PciBar; PCI_MAX_BAR]`, attributes (`u64`), supports (`u64`),
-     decodes (`u32`)
+   - `PciIoDevice::new(config, loc, pci, parent)` — full constructor that populates identity,
+     parent link, scans BARs, and detects capabilities; returns `PciIoDeviceRef`
+   - `Default` impl for test/dummy use (all zeros/nulls)
+   - Device identity: bus/device/function, PCI config header (`PciType00` in `pci_config.rs`)
+   - Resource management: `pci_bar: Vec<PciBar>`, attributes, supports, decodes
    - Hierarchy: parent `Option<Weak<RefCell<PciIoDevice>>>`, children `Vec<PciIoDeviceRef>`
    - Status flags: registered, allocated, all_op_rom_processed, embedded_rom, bus_override
-   - ROM: rom_size (`u32`), ignore_rom (`bool`)
+   - ROM: rom_size, ignore_rom
    - Protocol pointers: device_path, pci_root_bridge_io (stored as raw pointers)
-   - PCIe capabilities: is_pci_exp, is_ari_enabled, pci_express_capability_offset (`u8`),
-     ari/sriov/mriov capability offsets (`u32`)
-   - SR-IOV: `vf_pci_bar: [PciBar; PCI_MAX_BAR]`, system_page_size, initial_vfs, reserved_bus_num
-   - Bridge: bridge_io_alignment (`u16`), resizable_bar_offset/number
+   - PCIe capabilities: is_pci_exp, is_ari_enabled, pci_express_capability_offset,
+     ari/sriov/mriov capability offsets
+   - SR-IOV: `vf_pci_bar: Vec<PciBar>`, system_page_size, initial_vfs, reserved_bus_num
+   - Bridge: bridge_io_alignment, resizable_bar_offset/number
    - Hot plug: resource_padding_descriptors, padding_attributes, bus_number_ranges
-   - Max payload size (`u8`)
-   - Handle (`efi::Handle`)
+   - Max payload size
+   - Handle
+   - Private methods: `location()`, `is_bridge()`, `probe_bar()`, `parse_bar()`,
+     `scan_bars()`, `has_capability_list()`, `locate_capability()`,
+     `locate_extended_capability()`, `detect_capabilities()`
 
 3. **PciResourceNode** (`resource/resource_node.rs`)
    - Tree structure for resource requirements
@@ -288,46 +284,61 @@ components/pci_bus/
 
 **Goal:** Implement device discovery and bus scanning.
 
-**Status:** Not started
+**Status:** ✅ Done (extensively reviewed and refactored in Session 3)
 
 **C source reference:** `PciEnumerator.c` (~2,248 lines), `PciEnumeratorSupport.c` (~3,114 lines)
 
-**Tasks:**
+**Implementation notes (for future agents):**
 
-1. **Top-level enumeration** (`enumerator/mod.rs`)
-   - `pci_host_bridge_enumerator()` — drives full enumeration sequence
-   - `pci_root_bridge_enumerator()` — enumerate a single root bridge
-   - Notify phases via Host Bridge Resource Allocation Protocol:
-     BeginEnumeration → BeginBusAllocation → EndBusAllocation →
-     BeginResourceAllocation → (submit) → EndResourceAllocation →
-     EndEnumeration
+- BAR scanning, capability detection, and bus scanning are fully implemented and tested.
+- All BAR/capability logic is encapsulated as private methods on `PciIoDevice` in `device.rs`.
+  There are no separate `bar_scan.rs` or `capabilities.rs` files — everything was folded in
+  during review.
+- `PciConfigAccess` trait in `pci_device/config_access.rs` abstracts all config space I/O.
+  Only `RootBridgeIoAccess::new()` is unsafe. All other code is safe.
+- `PciLocation { bus, device, function }` bundles address components. Raw `u64` PCI addresses
+  are never exposed outside `config_access.rs` (private `encode_pci_address` helper).
+- `PciBar` constructors (`from_io`, `from_mem32`, `from_mem64`) handle BAR classification.
+  They return `Result<Self, InvalidBarError>` — zero-length BARs are errors.
+- `bus_scan.rs` is a top-level module (not under `enumerator/`). It contains only the
+  recursive `scan_bus()` function.
+- Header-type constants (`PCI_HEADER_TYPE_BRIDGE`, `PCI_HEADER_TYPE_MULTI_FUNC`) live in
+  `pci_config.rs` and are re-exported from `pci_device::mod.rs`.
 
-2. **Bus scanning** (`enumerator/bus_scan.rs`)
-   - `pci_device_info_collector()` — recursive device scanning
-   - For each bus (0-255), device (0-31), function (0-7):
-     - Read vendor/device ID via Root Bridge I/O Pci.Read
-     - Skip if vendor == 0xFFFF
-     - Create `PciIoDevice` instance
-     - Check header type for multi-function and bridge detection
-     - For bridges: assign secondary bus number, recurse into downstream bus
-   - Reference: `PciPciDeviceInfoCollector()` in `PciEnumeratorSupport.c`
+**Actual files (vs. planned):**
 
-3. **BAR scanning** (`enumerator/bar_scan.rs`)
-   - Read and parse BAR registers (offset 0x10-0x24)
-   - Write 0xFFFFFFFF, read back to determine size
-   - Detect BAR type from low bits (IO vs Mem, 32 vs 64, prefetchable)
-   - Handle 64-bit BARs spanning two registers
-   - Parse expansion ROM BAR (offset 0x30)
-   - Reference: `BarExisted()`, `PciParseBar()` in `PciEnumeratorSupport.c`
+| Planned | Actual | Notes |
+|---------|--------|-------|
+| `enumerator/mod.rs` | removed | Was just a module wrapper; `bus_scan` moved to top-level |
+| `enumerator/bus_scan.rs` | `bus_scan.rs` | Top-level module, single `scan_bus()` function |
+| `enumerator/bar_scan.rs` | folded into `device.rs` | Private methods on `PciIoDevice` |
+| `enumerator/capabilities.rs` | folded into `device.rs` | Private methods on `PciIoDevice` |
+| `enumerator/config_access.rs` | `pci_device/config_access.rs` | Moved to `pci_device` module |
 
-4. **Capability parsing** (`enumerator/capabilities.rs`)
-   - Walk PCI capability linked list (starting from Cap Pointer at offset 0x34)
-   - Detect PCIe capabilities (Cap ID 0x10): link width/speed, slot info
-   - Parse ARI capability (extended, Cap ID 0x000E)
-   - Parse SR-IOV capability (extended, Cap ID 0x0010): VF count, system page size
-   - Parse MR-IOV capability (extended, Cap ID 0x0011)
-   - Detect resizable BAR capability (extended, Cap ID 0x0015)
-   - Reference: Various functions in `PciEnumeratorSupport.c`
+**Tasks (all done):**
+
+1. **Safe config access wrapper** (`pci_device/config_access.rs`) ✅
+   - `PciConfigAccess` trait: `read_config_u8/u16/u32`, `write_config_u32`, `read_config_header`
+   - `PciLocation` struct: `{ bus, device, function }`
+   - `RootBridgeIoAccess` struct: wraps `*mut PciRootBridgeIoProtocol`, single `unsafe fn new()`
+   - `encode_pci_address` private helper (handles standard + extended config space)
+
+2. **Bus scanning** (`bus_scan.rs`) ✅
+   - `scan_bus(config, parent, start_bus)` — recursive device scanning
+   - For each bus/device/function: reads config header, creates `PciIoDevice::new()`
+   - Multi-function detection via `PCI_HEADER_TYPE_MULTI_FUNC` bit
+   - Bridge detection: reads secondary bus, recurses if sec_bus > start_bus
+
+3. **BAR scanning** (private methods on `PciIoDevice` in `device.rs`) ✅
+   - `probe_bar()`: write 0xFFFF_FFFF / read back sizing mask / restore saved value
+   - `parse_bar()`: classifies BAR type, delegates to `PciBar::from_*` constructors
+   - `scan_bars()`: iterates BAR0–BAR5 (devices) or BAR0–BAR1 (bridges)
+   - Returns `Result<Option<PciBar>, InvalidBarError>`: Ok(None) = not present, Err = malformed
+
+4. **Capability parsing** (private methods on `PciIoDevice` in `device.rs`) ✅
+   - `locate_capability()`: walks standard capability linked list (offset 0x34)
+   - `locate_extended_capability()`: walks PCIe extended capability list (offset 0x100)
+   - `detect_capabilities()`: finds PCIe, ARI, SR-IOV, MR-IOV, resizable BAR offsets
 
 ### Phase 5: Resource Allocation
 
@@ -543,16 +554,22 @@ components/pci_bus/
 
 ### 1. Trait Abstractions for Consumed Protocols
 
-Wrap raw FFI protocol pointers behind safe Rust traits (similar to HID's `HidIo` trait). This
-enables unit testing with mocks and provides type safety.
+Wrap raw FFI protocol pointers behind safe Rust traits. This enables unit testing with mocks
+and provides type safety.
 
+**Implemented:** `PciConfigAccess` trait in `pci_device/config_access.rs`:
 ```rust
-pub trait PciRootBridgeIo {
-    fn pci_read(&self, width: Width, address: u64, count: usize, buffer: &mut [u8]) -> Result<(), efi::Status>;
-    fn pci_write(&self, width: Width, address: u64, count: usize, buffer: &[u8]) -> Result<(), efi::Status>;
-    // ... other operations
+pub trait PciConfigAccess {
+    fn read_config_u8(&self, loc: PciLocation, offset: u32) -> u8;
+    fn read_config_u16(&self, loc: PciLocation, offset: u32) -> u16;
+    fn read_config_u32(&self, loc: PciLocation, offset: u32) -> u32;
+    fn write_config_u32(&self, loc: PciLocation, offset: u32, value: u32);
+    fn read_config_header(&self, loc: PciLocation) -> Option<PciType00>;
 }
 ```
+`RootBridgeIoAccess` is the real implementation wrapping `*mut PciRootBridgeIoProtocol`.
+Only its `new()` is unsafe. All consuming code (BAR scanning, capability walking, bus scanning)
+is fully safe.
 
 ### 2. PciIoDevice Ownership Model
 

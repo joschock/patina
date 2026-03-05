@@ -3,8 +3,6 @@
 //! Defines [`PciIoDevice`], the central per-device struct that tracks identity,
 //! BAR state, hierarchy, capabilities, and lifecycle status for each discovered
 //! PCI device.
-//!
-
 
 use alloc::{rc::Rc, vec::Vec};
 use core::cell::RefCell;
@@ -12,10 +10,39 @@ use core::cell::RefCell;
 use r_efi::efi;
 
 use super::{
-    PCI_MAX_BAR, PciBar,
-    pci_config::PciType00,
+    PciBar,
+    bar::InvalidBarError,
+    config_access::{PciConfigAccess, PciLocation},
+    pci_config::{PCI_HEADER_TYPE_BRIDGE, PciType00},
 };
 use crate::protocols::root_bridge_io::PciRootBridgeIoProtocol;
+
+// -- BAR scanning constants --
+
+const PCI_BAR0_OFFSET: u32 = 0x10;
+const PCI_BAR1_OFFSET: u32 = 0x14;
+const PCI_BAR5_OFFSET: u32 = 0x24;
+const BAR_REGISTER_SIZE: u32 = 4;
+
+// BAR register bit fields
+const BAR_BIT_IO_SPACE: u32 = 0x01;
+const BAR_MEM_TYPE_MASK: u32 = 0x06;
+const BAR_MEM_TYPE_32: u32 = 0x00;
+const BAR_MEM_TYPE_64: u32 = 0x04;
+const BAR_BIT_PREFETCHABLE: u32 = 0x08;
+
+// -- Capability constants --
+
+const PCI_CAPABILITY_POINTER_OFFSET: u32 = 0x34;
+const PCIE_CAPABILITY_BASE_OFFSET: u32 = 0x100;
+const PCI_STATUS_OFFSET: u32 = 0x06;
+const PCI_STATUS_CAPABILITIES_LIST: u16 = 0x0010;
+
+const CAP_ID_PCIEXP: u8 = 0x10;
+const EXCAP_ID_ARI: u16 = 0x000E;
+const EXCAP_ID_SRIOV: u16 = 0x0010;
+const EXCAP_ID_MRIOV: u16 = 0x0011;
+const EXCAP_ID_REBAR: u16 = 0x0015;
 
 /// Shared, mutable reference to a [`PciIoDevice`].
 pub type PciIoDeviceRef = Rc<RefCell<PciIoDevice>>;
@@ -62,8 +89,8 @@ pub struct PciIoDevice {
     pub pci_root_bridge_io: *mut PciRootBridgeIoProtocol,
 
     // -- BARs --
-    /// Standard BARs (6 entries).
-    pub pci_bar: [PciBar; PCI_MAX_BAR],
+    /// Decoded BARs for this device.
+    pub pci_bar: Vec<PciBar>,
 
     // -- Hierarchy --
     /// Parent bridge (None for root bridge children).
@@ -113,7 +140,7 @@ pub struct PciIoDevice {
 
     // -- SR-IOV --
     /// Virtual Function BARs (for SR-IOV capable devices).
-    pub vf_pci_bar: [PciBar; PCI_MAX_BAR],
+    pub vf_pci_bar: Vec<PciBar>,
     /// System page size for SR-IOV.
     pub system_page_size: u32,
     /// Initial number of Virtual Functions.
@@ -145,8 +172,196 @@ pub struct PciIoDevice {
 }
 
 impl PciIoDevice {
-    /// Creates a new `PciIoDevice` with default/zero values.
-    pub fn new() -> Self {
+    /// Creates a fully-initialized device from a discovered config header.
+    ///
+    /// Populates identity, parent link, BARs, and capabilities, then wraps
+    /// the result in `Rc<RefCell<...>>` for shared ownership.
+    pub fn new(
+        config: &dyn PciConfigAccess,
+        loc: PciLocation,
+        pci: PciType00,
+        parent: Option<&PciIoDeviceRef>,
+    ) -> PciIoDeviceRef {
+        let mut dev = Self {
+            bus_number: loc.bus,
+            device_number: loc.device,
+            function_number: loc.function,
+            pci,
+            parent: parent.map(Rc::downgrade),
+            ..Self::default()
+        };
+
+        dev.scan_bars(config);
+        dev.detect_capabilities(config);
+
+        Rc::new(RefCell::new(dev))
+    }
+
+    /// Returns the PCI location (bus/device/function) of this device.
+    pub fn location(&self) -> PciLocation {
+        PciLocation::new(self.bus_number, self.device_number, self.function_number)
+    }
+
+    /// Returns true if this device is a PCI-PCI bridge (header type 01h).
+    pub fn is_bridge(&self) -> bool {
+        (self.pci.hdr.header_type & 0x7F) == PCI_HEADER_TYPE_BRIDGE
+    }
+
+    // -- BAR scanning (private) --
+
+    fn probe_bar(&self, config: &dyn PciConfigAccess, offset: u32) -> Option<(u32, u32)> {
+        let loc = self.location();
+        let saved = config.read_config_u32(loc, offset);
+        config.write_config_u32(loc, offset, 0xFFFF_FFFF);
+        let sizing_mask = config.read_config_u32(loc, offset);
+        config.write_config_u32(loc, offset, saved);
+
+        if sizing_mask == 0 { None } else { Some((sizing_mask, saved)) }
+    }
+
+    fn parse_bar(
+        &self,
+        config: &dyn PciConfigAccess,
+        offset: u32,
+    ) -> Result<Option<PciBar>, InvalidBarError> {
+        let Some((sizing_mask, saved)) = self.probe_bar(config, offset) else {
+            return Ok(None);
+        };
+
+        if (sizing_mask & BAR_BIT_IO_SPACE) != 0 {
+            return PciBar::from_io(sizing_mask, saved, offset).map(Some);
+        }
+
+        let prefetchable = (sizing_mask & BAR_BIT_PREFETCHABLE) != 0;
+
+        match sizing_mask & BAR_MEM_TYPE_MASK {
+            BAR_MEM_TYPE_32 => {
+                PciBar::from_mem32(sizing_mask, saved, prefetchable, offset).map(Some)
+            }
+            BAR_MEM_TYPE_64 => {
+                let (upper_sizing, upper_saved) =
+                    self.probe_bar(config, offset + BAR_REGISTER_SIZE)
+                        .unwrap_or((0xFFFF_FFFF, 0));
+                PciBar::from_mem64(
+                    sizing_mask,
+                    saved,
+                    upper_sizing,
+                    upper_saved,
+                    prefetchable,
+                    offset,
+                ).map(Some)
+            }
+            _ => Err(InvalidBarError { offset, sizing_mask }),
+        }
+    }
+
+    /// Probes and populates the BAR list for this device.
+    pub fn scan_bars(&mut self, config: &dyn PciConfigAccess) {
+        let last_offset = if self.is_bridge() { PCI_BAR1_OFFSET } else { PCI_BAR5_OFFSET };
+        let mut bars = Vec::new();
+        let mut offset = PCI_BAR0_OFFSET;
+
+        while offset <= last_offset {
+            match self.parse_bar(config, offset) {
+                Ok(Some(bar)) => {
+                    offset = bar.next_offset();
+                    bars.push(bar);
+                }
+                _ => {
+                    offset += BAR_REGISTER_SIZE;
+                }
+            }
+        }
+
+        self.pci_bar = bars;
+    }
+
+    // -- Capability walking (private) --
+
+    fn has_capability_list(&self, config: &dyn PciConfigAccess) -> bool {
+        let status = config.read_config_u16(self.location(), PCI_STATUS_OFFSET);
+        (status & PCI_STATUS_CAPABILITIES_LIST) != 0
+    }
+
+    fn locate_capability(&self, config: &dyn PciConfigAccess, cap_id: u8) -> Option<u8> {
+        if !self.has_capability_list(config) {
+            return None;
+        }
+
+        let loc = self.location();
+        let mut cap_ptr = config.read_config_u8(loc, PCI_CAPABILITY_POINTER_OFFSET);
+
+        while cap_ptr >= 0x40 && (cap_ptr & 0x03) == 0x00 {
+            let entry = config.read_config_u16(loc, cap_ptr as u32);
+
+            let entry_id = (entry & 0xFF) as u8;
+            if entry_id == cap_id {
+                return Some(cap_ptr);
+            }
+
+            let next = (entry >> 8) as u8;
+            if next == cap_ptr {
+                break;
+            }
+            cap_ptr = next;
+        }
+
+        None
+    }
+
+    fn locate_extended_capability(
+        &self,
+        config: &dyn PciConfigAccess,
+        cap_id: u16,
+    ) -> Option<u32> {
+        let loc = self.location();
+        let mut cap_ptr = PCIE_CAPABILITY_BASE_OFFSET;
+
+        while cap_ptr != 0 {
+            cap_ptr &= 0xFFC;
+
+            let entry = config.read_config_u32(loc, cap_ptr);
+
+            if entry == 0xFFFF_FFFF {
+                break;
+            }
+
+            let entry_id = (entry & 0xFFFF) as u16;
+            if entry_id == cap_id {
+                return Some(cap_ptr);
+            }
+
+            cap_ptr = (entry >> 20) & 0xFFF;
+        }
+
+        None
+    }
+
+    /// Detects PCIe and extended capabilities, populating the
+    /// corresponding offset fields.
+    fn detect_capabilities(&mut self, config: &dyn PciConfigAccess) {
+        if let Some(offset) = self.locate_capability(config, CAP_ID_PCIEXP) {
+            self.is_pci_exp = true;
+            self.pci_express_capability_offset = offset;
+
+            if let Some(ari) = self.locate_extended_capability(config, EXCAP_ID_ARI) {
+                self.ari_capability_offset = ari;
+            }
+            if let Some(sriov) = self.locate_extended_capability(config, EXCAP_ID_SRIOV) {
+                self.sriov_capability_offset = sriov;
+            }
+            if let Some(mriov) = self.locate_extended_capability(config, EXCAP_ID_MRIOV) {
+                self.mriov_capability_offset = mriov;
+            }
+            if let Some(rebar) = self.locate_extended_capability(config, EXCAP_ID_REBAR) {
+                self.resizable_bar_offset = rebar;
+            }
+        }
+    }
+}
+
+impl Default for PciIoDevice {
+    fn default() -> Self {
         Self {
             handle: core::ptr::null_mut(),
             bus_number: 0,
@@ -155,7 +370,7 @@ impl PciIoDevice {
             pci: PciType00::default(),
             device_path: core::ptr::null_mut(),
             pci_root_bridge_io: core::ptr::null_mut(),
-            pci_bar: [PciBar::default(); PCI_MAX_BAR],
+            pci_bar: Vec::new(),
             parent: None,
             child_list: Vec::new(),
             registered: false,
@@ -174,7 +389,7 @@ impl PciIoDevice {
             ari_capability_offset: 0,
             sriov_capability_offset: 0,
             mriov_capability_offset: 0,
-            vf_pci_bar: [PciBar::default(); PCI_MAX_BAR],
+            vf_pci_bar: Vec::new(),
             system_page_size: 0,
             initial_vfs: 0,
             reserved_bus_num: 0,
@@ -189,19 +404,13 @@ impl PciIoDevice {
     }
 }
 
-impl Default for PciIoDevice {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 #[cfg(test)]
 mod test {
     use super::*;
 
     #[test]
     fn test_pci_io_device_default() {
-        let dev = PciIoDevice::new();
+        let dev = PciIoDevice::default();
         assert_eq!(dev.bus_number, 0);
         assert_eq!(dev.device_number, 0);
         assert_eq!(dev.function_number, 0);
