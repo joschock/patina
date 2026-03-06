@@ -2,7 +2,7 @@
 
 ## Current Progress
 
-> **Last updated:** 2026-03-05 (Session 5 — Phase 5 review complete, ready for Phase 5a)
+> **Last updated:** 2026-03-05 (Session 5 — Phases 5a + 5b complete, ready for Phase 6)
 >
 > **Build:** `cargo build -p pci_bus` ✅ | `cargo test -p pci_bus` ✅ (24 tests passing)
 > | `cargo make clippy` ✅ (0 warnings)
@@ -14,15 +14,15 @@
 > | 3. Component & Driver Binding | 🔶 Skeleton | Entry point + driver binding compile with stub Start/Stop. |
 > | 4. PCI Enumeration | ✅ Done | BAR scanning, bus scanning, capability parsing. Extensively reviewed and refactored. |
 > | 5. Resource Allocation | ✅ Done | Resource tree construction, degradation, aperture calc, BAR/bridge programming. Reviewed and refactored in Session 5. |
-> | 5a. PciIoDevice Encapsulation | ⬜ Not started | Make PciIoDevice fields private, add accessor methods. Must complete before Phase 6. |
-> | 5b. TPL Protection for BAR Probing | ⬜ Not started | Add raise_tpl_guarded() around probe_bar critical section. |
+> | 5a. PciIoDevice Encapsulation | ✅ Done | All fields private, accessor methods, test-only setters. |
+> | 5b. TPL Protection for BAR Probing | ✅ Done | Object-safe TplServices trait, TplGuard RAII, probe_bar protected. |
 > | 6. PCI I/O Protocol | ⬜ Not started | |
 > | 7. Supporting Features | ⬜ Not started | |
 > | 8. Device Lifecycle | ⬜ Not started | |
 > | 9. Testing | ⬜ Not started | 24 tests exist from Phases 1-5 |
 > | 10. Integration & Docs | ⬜ Not started | |
 >
-> **Next steps:** Phase 5a (PciIoDevice encapsulation), then 5b (TPL), then Phase 6 (PCI I/O Protocol).
+> **Next steps:** Phase 6 (PCI I/O Protocol production).
 > Phase 3 (driver binding) is intentionally left as a skeleton — Start/Stop bodies and the
 > Supported device path check will be completed as part of Phases 6 and 8.
 
@@ -466,38 +466,24 @@ and will become a maintenance burden as more code consumes the struct in Phase 6
 
 ### Phase 5b: TPL Protection for BAR Probing
 
-**Goal:** Add TPL raise/restore around the BAR probe critical section in `scan_bars`/`probe_bar`
+**Goal:** Add TPL raise/restore around the BAR probe critical section in `probe_bar`
 to prevent timer interrupts from accessing a device while its BARs are temporarily invalid.
 
-**Status:** Not started
+**Status:** ✅ Done
 
-**Motivation:** `probe_bar()` writes `0xFFFFFFFF` to a BAR, reads back the sizing mask, then
-restores the original value. If a timer interrupt fires mid-probe, an interrupt handler could
-access the device through a now-invalid BAR, causing a machine check or data corruption. The C
-reference wraps this in `RaiseTPL(TPL_HIGH_LEVEL)` / `RestoreTPL()`. The Rust code currently
-has no TPL protection.
+**Implementation:**
 
-**Approach:** Use the existing `BootServices::raise_tpl_guarded(Tpl::NOTIFY)` RAII guard from
-`sdk/patina/src/boot_services/tpl.rs`. Pass `&dyn BootServices` down the call chain rather than
-coupling TPL to `PciConfigAccess`.
-
-**Tasks:**
-
-1. **Add `BootServices` parameter to `probe_bar()`** — wrap the write-all-ones / read-back /
-   restore sequence in `bs.raise_tpl_guarded(Tpl::NOTIFY)`.
-
-2. **Thread `BootServices` through callers** — `scan_bars()` and its callers in `bus_scan.rs`
-   need the extra parameter. `PciBusComponent` already holds `StandardBootServices`.
-
-3. **Update tests** — test mocks for `PciConfigAccess` don't need real TPL; add a mock or
-   no-op `BootServices` implementation for test contexts.
-
-4. **Verify** — `cargo build`, `cargo test`, `cargo clippy` all pass.
+- TPL is an implementation detail of `PciConfigAccess`. The trait provides a `probe_bar()`
+  method with a default implementation (no TPL protection, suitable for test mocks).
+- `RootBridgeIoAccess<B: BootServices>` stores a `TplMutex<(), B>` and overrides `probe_bar()`
+  to lock the mutex around the destructive write-all-ones / read-back / restore sequence.
+- No custom guard types — the `TplMutexGuard` from the SDK handles RAII TPL restore on drop.
+- Signatures are clean: `scan_bus(config, parent, bus)`, `PciIoDevice::new(config, loc, pci, parent)`,
+  `scan_bars(config)` — no generics or TPL threading needed.
 
 **Notes:**
-- The C reference uses `TPL_HIGH_LEVEL`; `Tpl::NOTIFY` is the Patina SDK's equivalent
-  highest level that blocks timer interrupts. Verify this mapping is correct.
-- The RAII `TplGuard` ensures TPL is restored even on early return — no cleanup risk.
+- `TPL_HIGH_LEVEL` is used (via `Tpl(efi::TPL_HIGH_LEVEL)`), matching the C reference's
+  `RaiseTPL(TPL_HIGH_LEVEL)` behavior during BAR probing.
 - Programming path does NOT need TPL (device decode is already disabled at that point).
 
 ### Phase 6: PCI I/O Protocol Production

@@ -283,18 +283,9 @@ impl PciIoDevice {
 
     // -- BAR scanning (private) --
 
-    fn probe_bar(&self, config: &dyn PciConfigAccess, offset: u32) -> Option<(u32, u32)> {
-        let loc = self.location();
-        let saved = config.read_config_u32(loc, offset);
-        config.write_config_u32(loc, offset, 0xFFFF_FFFF);
-        let sizing_mask = config.read_config_u32(loc, offset);
-        config.write_config_u32(loc, offset, saved);
-
-        if sizing_mask == 0 { None } else { Some((sizing_mask, saved)) }
-    }
-
     fn parse_bar(&self, config: &dyn PciConfigAccess, offset: u32) -> Result<Option<PciBar>, InvalidBarError> {
-        let Some((sizing_mask, saved)) = self.probe_bar(config, offset) else {
+        let loc = self.location();
+        let Some((sizing_mask, saved)) = config.probe_bar(loc, offset) else {
             return Ok(None);
         };
 
@@ -308,7 +299,7 @@ impl PciIoDevice {
             BAR_MEM_TYPE_32 => PciBar::from_mem32(sizing_mask, saved, prefetchable, offset).map(Some),
             BAR_MEM_TYPE_64 => {
                 let (upper_sizing, upper_saved) =
-                    self.probe_bar(config, offset + BAR_REGISTER_SIZE).unwrap_or((0xFFFF_FFFF, 0));
+                    config.probe_bar(loc, offset + BAR_REGISTER_SIZE).unwrap_or((0xFFFF_FFFF, 0));
                 PciBar::from_mem64(sizing_mask, saved, upper_sizing, upper_saved, prefetchable, offset).map(Some)
             }
             _ => Err(InvalidBarError { offset, sizing_mask }),

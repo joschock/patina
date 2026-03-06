@@ -5,6 +5,12 @@
 //! Protocol behind a safe interface. All enumerator code uses this trait
 //! instead of raw protocol pointers.
 
+use patina::{
+    boot_services::{BootServices, tpl::Tpl},
+    tpl_mutex::TplMutex,
+};
+use r_efi::efi;
+
 use super::pci_config::PciType00;
 use crate::protocols::root_bridge_io::{PciRootBridgeIoProtocol, Width};
 
@@ -35,6 +41,21 @@ pub trait PciConfigAccess {
 
     /// Writes a 32-bit value to config space.
     fn write_config_u32(&self, loc: PciLocation, offset: u32, value: u32);
+
+    /// Probes a BAR by writing all-1s, reading back the sizing mask, then
+    /// restoring the original value. Returns `None` if the BAR is unimplemented
+    /// (sizing mask is zero).
+    ///
+    /// The default implementation performs the probe without TPL protection,
+    /// suitable for test mocks. Real implementations should override this to
+    /// raise TPL around the destructive write-read-restore sequence.
+    fn probe_bar(&self, loc: PciLocation, offset: u32) -> Option<(u32, u32)> {
+        let saved = self.read_config_u32(loc, offset);
+        self.write_config_u32(loc, offset, 0xFFFF_FFFF);
+        let sizing_mask = self.read_config_u32(loc, offset);
+        self.write_config_u32(loc, offset, saved);
+        if sizing_mask == 0 { None } else { Some((sizing_mask, saved)) }
+    }
 
     /// Reads a full Type 00h PCI config header (64 bytes).
     ///
@@ -76,18 +97,19 @@ fn encode_pci_address(loc: PciLocation, offset: u32) -> u64 {
 ///
 /// The caller must ensure the `PciRootBridgeIoProtocol` pointer remains
 /// valid for the lifetime of this wrapper.
-pub struct RootBridgeIoAccess {
+pub struct RootBridgeIoAccess<B: BootServices> {
     rbi: *mut PciRootBridgeIoProtocol,
+    tpl_mutex: TplMutex<(), B>,
 }
 
-impl RootBridgeIoAccess {
+impl<B: BootServices> RootBridgeIoAccess<B> {
     /// Creates a new wrapper around the given Root Bridge I/O Protocol.
     ///
     /// # Safety
     ///
     /// `rbi` must be a valid pointer for the lifetime of this struct.
-    pub unsafe fn new(rbi: *mut PciRootBridgeIoProtocol) -> Self {
-        Self { rbi }
+    pub unsafe fn new(rbi: *mut PciRootBridgeIoProtocol, boot_services: B) -> Self {
+        Self { rbi, tpl_mutex: TplMutex::new(boot_services, Tpl(efi::TPL_HIGH_LEVEL), ()) }
     }
 
     /// Returns the underlying protocol pointer.
@@ -96,7 +118,7 @@ impl RootBridgeIoAccess {
     }
 }
 
-impl PciConfigAccess for RootBridgeIoAccess {
+impl<B: BootServices> PciConfigAccess for RootBridgeIoAccess<B> {
     fn read_config_u8(&self, loc: PciLocation, offset: u32) -> u8 {
         let mut value: u8 = 0;
         let addr = encode_pci_address(loc, offset);
@@ -153,6 +175,19 @@ impl PciConfigAccess for RootBridgeIoAccess {
                 log::warn!("PCI config write_u32 failed at {:?} offset {:#x}: {:#x}", loc, offset, status.as_usize());
             }
         }
+    }
+
+    fn probe_bar(&self, loc: PciLocation, offset: u32) -> Option<(u32, u32)> {
+        let saved = self.read_config_u32(loc, offset);
+
+        // Raise TPL to prevent timer interrupts while BAR is temporarily invalid.
+        let _guard = self.tpl_mutex.lock();
+        self.write_config_u32(loc, offset, 0xFFFF_FFFF);
+        let sizing_mask = self.read_config_u32(loc, offset);
+        self.write_config_u32(loc, offset, saved);
+        drop(_guard);
+
+        if sizing_mask == 0 { None } else { Some((sizing_mask, saved)) }
     }
 }
 
