@@ -15,8 +15,8 @@
 > | 4. PCI Enumeration | ✅ Done | BAR scanning, bus scanning, capability parsing. Extensively reviewed and refactored. |
 > | 5. Resource Allocation | ✅ Done | Resource tree construction, degradation, aperture calc, BAR/bridge programming. Reviewed and refactored in Session 5. |
 > | 5a. PciIoDevice Encapsulation | ✅ Done | All fields private, accessor methods, test-only setters. |
-> | 5b. TPL Protection for BAR Probing | ✅ Done | Object-safe TplServices trait, TplGuard RAII, probe_bar protected. |
-> | 6. PCI I/O Protocol | ⬜ Not started | |
+> | 5b. TPL Protection for BAR Probing | ✅ Done | TplMutex-based probe_bar on PciConfigAccess trait; TPL_HIGH_LEVEL. |
+> | 6. PCI I/O Protocol | 🔶 In progress | PciIoInstance wrapper, all 16 protocol functions implemented. 6g (lifecycle integration) pending. |
 > | 7. Supporting Features | ⬜ Not started | |
 > | 8. Device Lifecycle | ⬜ Not started | |
 > | 9. Testing | ⬜ Not started | 24 tests exist from Phases 1-5 |
@@ -490,9 +490,40 @@ to prevent timer interrupts from accessing a device while its BARs are temporari
 
 **Goal:** Implement the PCI I/O Protocol installed for each discovered device.
 
-**Status:** Not started
+**Status:** In progress (6a-6f ✅ Done, 6g pending)
 
 **C source reference:** `PciIo.c` (~2,152 lines)
+
+**Implementation:** `components/pci_bus/src/pci_io/mod.rs`
+
+- `PciIoInstance` — `#[repr(C)]` wrapper with r_efi Protocol as first field for
+  zero-cost context recovery. Stores `PciIoDeviceRef` (no redundant RBI pointer;
+  accessed via `device.borrow().root_bridge_io()`).
+- **Config space** — `pci.read`/`pci.write` validate width (Uint8/16/32), bounds-check
+  offset against 4K config space, encode PCI address, delegate to Root Bridge I/O.
+- **GetLocation** — returns segment/bus/device/function from device state + RBI segment.
+- **Attributes** — GET/SET/ENABLE/DISABLE/SUPPORTED operations on device attribute flags.
+- **Memory/IO** — `mem.read`/`write`, `io.read`/`write` validate BAR index, compute
+  absolute address from BAR base + offset, delegate to Root Bridge I/O. Supports
+  PASS_THROUGH_BAR (0xFF) for direct addressing.
+- **Poll** — `poll_mem`/`poll_io` delegate to Root Bridge I/O with BAR translation.
+- **CopyMem** — validates both source and destination BARs, delegates to RBI.
+- **DMA** — `map`/`unmap`/`allocate_buffer`/`free_buffer`/`flush` delegate to Root Bridge
+  I/O. Handles dual-address-cycle (DAC) by selecting 32-bit or 64-bit RBI operations.
+  AllocateBuffer forces below-4GB allocation when device lacks DAC.
+- **BAR attributes** — `get_bar_attributes` returns supported flags; `set_bar_attributes`
+  validates inputs and returns SUCCESS (matching C reference no-op behavior).
+  - **TODO:** `get_bar_attributes` does not yet build the ACPI QWORD address-space resource
+    descriptor for the `resources` output parameter (matching C reference `PciIoGetBarAttributes`).
+
+**Code quality:**
+- All helpers (`validate_bar_access`, `pci_io_width_to_rb_io_width`, `config_width_to_rbi_width`,
+  `width_byte_size`, `map_dma_operation`) grouped in a dedicated "Private helpers" section.
+- All 16 protocol functions and helpers have doc comments.
+- Invalid width/operation values produce `log::warn!` + `debug_assert!`.
+- Use statements consolidated at file top; descriptive variable names throughout.
+
+**Remaining:** Phase 6g — wire `PciIoInstance` creation into `driver_binding_start`/`stop`.
 
 **Tasks:**
 

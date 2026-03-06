@@ -77,7 +77,7 @@ pub trait PciConfigAccess {
 
 /// Encodes a PCI location and config space offset into the 64-bit address
 /// format expected by the Root Bridge I/O Protocol's Pci.Read/Pci.Write.
-fn encode_pci_address(loc: PciLocation, offset: u32) -> u64 {
+pub(crate) fn encode_pci_address(loc: PciLocation, offset: u32) -> u64 {
     let mut addr: u64 = 0;
     addr |= (loc.bus as u64) << 24;
     addr |= (loc.device as u64) << 16;

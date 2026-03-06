@@ -281,6 +281,26 @@ impl PciIoDevice {
         self.decodes = decodes;
     }
 
+    /// Returns the PCI Root Bridge I/O Protocol pointer for this device.
+    pub fn root_bridge_io(&self) -> *mut PciRootBridgeIoProtocol {
+        self.pci_root_bridge_io
+    }
+
+    /// Returns the currently enabled attributes for this device.
+    pub fn attributes(&self) -> u64 {
+        self.attributes
+    }
+
+    /// Returns the attributes supported by this device.
+    pub fn supports(&self) -> u64 {
+        self.supports
+    }
+
+    /// Sets the currently enabled attributes.
+    pub fn set_attributes(&mut self, attributes: u64) {
+        self.attributes = attributes;
+    }
+
     // -- BAR scanning (private) --
 
     fn parse_bar(&self, config: &dyn PciConfigAccess, offset: u32) -> Result<Option<PciBar>, InvalidBarError> {
@@ -461,6 +481,11 @@ impl PciIoDevice {
     /// Sets the BAR list (test only).
     pub fn set_pci_bar(&mut self, bars: Vec<PciBar>) {
         self.pci_bar = bars;
+    }
+
+    /// Creates a default device wrapped in `Rc<RefCell<...>>` (test only).
+    pub fn default_ref() -> PciIoDeviceRef {
+        Rc::new(RefCell::new(PciIoDevice::default()))
     }
 }
 

@@ -10,6 +10,7 @@ pub mod device;
 pub mod pci_config;
 
 pub use bar::{PciBar, PciBarType};
+pub(crate) use config_access::encode_pci_address;
 pub use config_access::{PciConfigAccess, PciLocation};
 pub use device::{PciIoDevice, PciIoDeviceRef};
 pub use pci_config::{PCI_HEADER_TYPE_BRIDGE, PCI_HEADER_TYPE_MULTI_FUNC, PciType00, PciType01, ppb_regs};
