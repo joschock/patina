@@ -523,45 +523,37 @@ to prevent timer interrupts from accessing a device while its BARs are temporari
 - Invalid width/operation values produce `log::warn!` + `debug_assert!`.
 - Use statements consolidated at file top; descriptive variable names throughout.
 
-**Remaining:** Phase 6g — wire `PciIoInstance` creation into `driver_binding_start`/`stop`.
+**Remaining work:**
 
-**Tasks:**
+1. **Phase 6g — Lifecycle integration** (`components/pci_bus/src/component.rs`)
+   - In `driver_binding_start`: after creating `PciIoDevice`, create a `PciIoInstance::new(device_ref)`,
+     leak it to firmware via `Box::leak(Box::new(...))`, and install the protocol on the
+     device handle using `install_protocol_interface`.
+   - In `driver_binding_stop`: uninstall the protocol and clean up (drop the leaked instance).
+   - The `component.rs` file already has a `TODO` comment marking where this integration goes.
+   - Reference: `RegisterPciDevice()` in C reference `PciDeviceSupport.c`.
 
-1. **Protocol structure** (`pci_io/mod.rs`)
-   - Build `r_efi::protocols::pci_io::Protocol` function pointer table
-   - Each `extern "efiapi"` function recovers `PciIoDevice` context
-   - Context recovery: store `PciIoDevice` pointer adjacent to protocol struct,
-     use pointer math (like C's `CR()` / `CONTAINING_RECORD` macro)
-   - Alternatively: use a wrapper struct `PciIoWrapper { protocol: Protocol, device: *mut PciIoDevice }`
+2. **Phase 6f follow-up — ACPI resource descriptor** (`components/pci_bus/src/pci_io/mod.rs`)
+   - `pci_io_get_bar_attributes` currently ignores the `_resources` output parameter.
+   - Implement: allocate a buffer, fill with an ACPI QWORD address-space descriptor
+     (base, length, type from the BAR), return via the resources pointer.
+   - Reference: `PciIoGetBarAttributes()` in C reference `PciIo.c`.
 
-2. **Config space** (`pci_io/config.rs`)
-   - `pci_io_config_read()` / `pci_io_config_write()`
-   - Validate width (8/16/32), count, and offset within config space
-   - Build PCI address from device's segment/bus/dev/fn + offset
-   - Delegate to Root Bridge I/O Protocol's Pci.Read/Pci.Write
-   - Reference: `PciIoConfigRead()`, `PciIoConfigWrite()` in `PciIo.c`
+**Known minor gaps:**
+- FIFO/Fill width variants do not normalize count to 1 in `validate_bar_access`
+  (C reference `PciIoVerifyBarAccess` does this). Low priority — affects edge-case
+  bounds checking only.
 
-3. **Memory & I/O** (`pci_io/mem_io.rs`)
-   - MMIO read/write: validate BAR, translate to Root Bridge I/O Mem.Read/Write
-   - I/O port read/write: validate BAR, translate to Root Bridge I/O Io.Read/Write
-   - Poll operations: periodic read-and-check with timeout
-   - Memory copy: between device memory regions
-   - Reference: `PciIoMemRead()`, `PciIoIoRead()`, `PciIoPollMem()` etc.
-
-4. **DMA** (`pci_io/dma.rs`)
-   - Map: translate system address to device-visible DMA address
-   - Unmap: release DMA mapping
-   - AllocateBuffer: allocate DMA-coherent memory
-   - FreeBuffer: release DMA buffer
-   - Flush: ensure cache coherency
-   - Handle dual-address-cycle (DAC) for 64-bit DMA
-   - Reference: `PciIoMap()`, `PciIoAllocateBuffer()` etc.
-
-5. **Attributes** (`pci_io/attributes.rs`)
-   - Operations: Get (current), Set (enable/disable), ListSupported
-   - Manage IO, Memory, BusMaster, VGA, ISA attributes via command register
-   - BAR attribute queries (memory type, prefetchability)
-   - GetLocation: return segment/bus/device/function tuple
+**Key patterns for the next agent:**
+- **Build/test:** `cargo build -p pci_bus`, `cargo test -p pci_bus`, `cargo make clippy`
+- **Context recovery:** `PciIoInstance` is `#[repr(C)]` with Protocol as first field.
+  `from_proto()` casts `*mut Protocol` → `&'static PciIoInstance`.
+- **Device access:** `instance.device()` returns `Ref<PciIoDevice>` (shared borrow).
+  `instance.device.borrow_mut()` for mutations (only in attributes SET/ENABLE/DISABLE).
+- **RBI delegation:** `instance.root_bridge_io()` returns `*mut PciRootBridgeIoProtocol`.
+  All I/O goes through RBI function pointers (unsafe FFI calls).
+- **Tests:** 27 passing tests in `pci_bus` crate. `PciIoDevice::default_ref()` is the
+  test helper for creating device refs.
 
 ### Phase 7: Supporting Features
 
