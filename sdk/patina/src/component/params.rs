@@ -792,10 +792,11 @@ macro_rules! impl_component_param_tuple {
                 Ok(())
             }
 
-            // This function is not used as we are overwriting the try_validate to call the individual param validate function
-            // instead of this one.
-            fn validate(_state: &Self::State, _storage: UnsafeStorageCell) -> bool {
-                true
+            // Must validate every element: this is called directly when the tuple is nested in another tuple or
+            // wrapped in an `Option`, rather than through `try_validate`.
+            fn validate(state: &Self::State, _storage: UnsafeStorageCell) -> bool {
+                let ($($param,)*) = state;
+                true $(&& $param::validate($param, _storage))*
             }
 
             fn init_state(_storage: &mut Storage, _meta: &mut MetaData) -> Result<Self::State, Cow<'static, str>> {
@@ -1056,12 +1057,38 @@ mod tests {
         let mut storage = Storage::default();
         let mut mock_meadata = MetaData::new::<i32>();
         <(StandardRuntimeServices, Config<i32>) as Param>::init_state(&mut storage, &mut mock_meadata).unwrap();
-        // This will always return true, because this function is not used with tuples. The tuple implementations
-        // override the next level up, `try_validate`.
-        assert!(<(StandardRuntimeServices, Config<i32>) as Param>::validate(&((), 0), (&storage).into()));
+        assert!(!<(StandardRuntimeServices, Config<i32>) as Param>::validate(&((), 0), (&storage).into()));
         assert_eq!(
             Err(Cow::from("patina::uefi::runtime_services::StandardRuntimeServices")),
             <(StandardRuntimeServices, Config<i32>) as Param>::try_validate(&((), 1), (&storage).into())
+        );
+    }
+
+    #[test]
+    fn test_nested_tuple_validates_inner_params() {
+        use crate::component::service::Service;
+
+        trait MissingService {}
+
+        let mut storage = Storage::default();
+        let mut mock_metadata = MetaData::new::<i32>();
+        storage.add_config(42u32);
+
+        type Nested = (Config<'static, u32>, (Config<'static, u32>, Service<dyn MissingService>));
+        let state = <Nested as Param>::init_state(&mut storage, &mut mock_metadata).unwrap();
+        assert!(!<Nested as Param>::validate(&state, (&storage).into()));
+        assert!(<Nested as Param>::try_validate(&state, (&storage).into()).is_err());
+
+        // Option<tuple> must resolve to None rather than panicking in get_param.
+        // SAFETY: Test code - Option<P> always validates; get_param re-checks P internally.
+        assert!(
+            unsafe {
+                <Option<(Config<'static, u32>, Service<dyn MissingService>)> as Param>::get_param(
+                    &state.1,
+                    (&storage).into(),
+                )
+            }
+            .is_none()
         );
     }
 

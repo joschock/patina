@@ -923,7 +923,6 @@ mod tests {
         assert_eq!(remaining, DevicePathBuf::from(path));
     }
 
-
     #[test]
     fn test_protocol_services_ext_locate_first_handle() {
         let mut mock = MockProtocolServices::new();
