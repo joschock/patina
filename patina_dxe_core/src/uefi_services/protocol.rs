@@ -167,9 +167,10 @@ impl ProtocolServices for CoreProtocolServices {
         // SAFETY: `raw_handle`/`raw_agent`/`raw_controller` come from validated `Handle` values.
         // The implicit UEFI spec assumption that driver bindings remain valid for the duration of
         // the call cannot be verified here (see `core_disconnect_controller`'s safety documentation).
-        let (interface, _already_started) =
+        let interface =
             match unsafe { core_open_protocol(raw_handle, guid, raw_agent, raw_controller, attributes.bits()) } {
-                Ok(result) => result,
+                Ok((interface, false)) => interface,
+                Ok((_interface, true)) => return Err(ProtocolError::AlreadyStarted),
                 Err(EfiError::Unsupported) => return Err(ProtocolError::NotFound),
                 Err(err) => return Err(ProtocolError::from(err)),
             };
