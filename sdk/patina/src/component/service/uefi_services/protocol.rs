@@ -60,7 +60,7 @@
 //!   managing a controller with this protocol. Uninstall attempts to release them by calling the
 //!   caller's driver binding `Stop()`, if one was installed with
 //!   [`install_driver_binding`](ProtocolServicesExt::install_driver_binding). `Stop()` must close the
-//!   usage to actually release it (returning `Ok(())` alone does not). See [`super::driver_binding`]
+//!   usage to actually release it (returning `Ok(())` alone does not). See [`driver_binding`]
 //!   for details.
 //! - [`OpenAttributes::ByChildController`] records that a child controller depends on the parent's
 //!   protocol. Like `Exclusive`, it blocks uninstall until closed.
@@ -87,8 +87,8 @@ use crate::standard::efi;
 #[cfg(feature = "unstable-device-path")]
 use crate::uefi::device_path::paths::{DevicePath, DevicePathBuf};
 
-use super::driver_binding;
-pub use super::driver_binding::DriverBinding;
+use super::driver_model::driver_binding;
+pub use super::driver_model::driver_binding::DriverBinding;
 pub use super::handle::Handle;
 pub use super::tpl::Tpl;
 
@@ -827,7 +827,7 @@ pub trait ProtocolServicesExt: ProtocolServices {
     /// receives `Supported()`/`Start()`/`Stop()` calls from `ConnectController()`/`DisconnectController()`,
     /// and an existing [`OpenAttributes::ByDriver`] or [`OpenAttributes::ByDriverExclusive`] usage recorded
     /// under the returned handle can be released or preempted, since there is now a `Stop()` for the core to
-    /// call. See [`super::driver_binding`] for details.
+    /// call. See [`driver_binding`] for details.
     ///
     /// # Errors
     ///
