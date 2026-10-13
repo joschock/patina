@@ -9,8 +9,8 @@
 //! lived approach
 //!
 //! 1. `with_protocol` runs a closure with the interface. Use it for a single, immediate use.
-//! 2. `with_protocol_on` runs a closure with the interface on a specific handle. Use it when the
-//!    handle was already located, such as when iterating over handles.
+//! 2. `open_protocol` returns a guard for an interface on a specific handle, recording the access
+//!    under the component's agent handle until the guard is dropped.
 //! 3. `locate_token` returns a token that stores only a handle. Use it to keep a reference for a
 //!    longer period of time such as throughout boot. Call `resolve` to re-validate on each use.
 //! 4. `on_protocol_installed` runs a callback for every present and future install. Use it when
@@ -28,7 +28,7 @@ use patina::{
         component,
         service::{
             Service,
-            uefi_services::protocol::{ProtocolServices, ProtocolServicesExt, Tpl},
+            uefi_services::protocol::{OpenAttributes, ProtocolServices, ProtocolServicesExt, Tpl},
         },
     },
     error::Result,
@@ -58,12 +58,29 @@ impl ProtocolConsumerSample {
 
         // Option 2 and 3 act on a specific handle, so first find one that has the protocol.
         if let Ok(handle) = protocols.locate_first_handle::<SampleVendorProtocol>() {
-            // Option 2: with_protocol_on. Same as with_protocol, but on a specific handle. The closure
-            // can use the interface across several statements.
-            protocols.with_protocol_on::<SampleVendorProtocol, _>(handle, |protocol| {
-                log::info!("with_protocol_on() revision is {:#x}", protocol.revision);
-                log::info!("with_protocol_on() status is {:#x}", (protocol.get_status)());
-            })?;
+            // An agent handle identifies this component to the protocol database. An agent handle is created once
+            // with register_agent and can be reused for every open_protocol call below.
+            let agent = protocols.register_agent()?;
+
+            // Option 2: open_protocol. Best when a block needs the interface across several
+            // statements. The guard dereferences to the interface and releases access at the end
+            // of the block. `Shared` records the access but does not stop the protocol from being
+            // uninstalled while the guard is held.
+            {
+                let protocol =
+                    protocols.open_protocol::<SampleVendorProtocol>(handle, agent, OpenAttributes::Shared)?;
+                log::info!("open_protocol() revision is {:#x}", protocol.revision);
+                log::info!("open_protocol() status is {:#x}", (protocol.get_status)());
+            }
+
+            // `Exclusive` blocks the protocol from being uninstalled while the guard is held, and
+            // first attempts to disconnect any existing `ByDriver` holder so the open can succeed.
+            // Use it when a component cannot tolerate the protocol disappearing partway through a
+            // critical section.
+            match protocols.open_protocol::<SampleVendorProtocol>(handle, agent, OpenAttributes::Exclusive) {
+                Ok(protocol) => log::info!("Exclusive open() status is {:#x}", (protocol.get_status)()),
+                Err(err) => log::debug!("Exclusive open failed: {err:?}"),
+            }
 
             // Option 3: locate_token then resolve. Best for using a protocol instance over time. The
             // token holds only a handle and doesn't dangle. resolve re-validates and returns None if the
