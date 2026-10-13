@@ -660,7 +660,7 @@ mod tests {
     }
 
     #[test]
-    fn test_protocol_services_open_interface_by_driver_reopen_same_agent_returns_ok() {
+    fn test_protocol_services_open_interface_by_driver_reopen_same_agent_returns_already_started() {
         with_locked_state(|| {
             let service = CoreProtocolServices;
             let guid = test_guid("44444444-aaaa-bbbb-cccc-444444444444");
@@ -671,10 +671,9 @@ mod tests {
             let attributes = OpenAttributes::ByDriver { controller: handle };
             service.open_interface(handle, guid, agent, attributes).unwrap();
 
-            // Reopening with the same agent/controller/attributes will return ALREADY_STARTED internally, but
-            // open_interface should return Ok with the interface still returned.
-            let reopened = service.open_interface(handle, guid, agent, attributes).unwrap();
-            assert_eq!(reopened, interface);
+            assert_eq!(service.open_interface(handle, guid, agent, attributes), Err(ProtocolError::AlreadyStarted));
+            service.close_interface(handle, guid, agent, Some(handle)).unwrap();
+            assert_eq!(service.open_interface(handle, guid, agent, attributes), Ok(interface));
         });
     }
 

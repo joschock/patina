@@ -14,7 +14,7 @@
 //! # Consuming a protocol over time
 //!
 //! A UEFI protocol can be installed and uninstalled at any point, so a plain `&P` handed out once
-//! can dangle later. [`ProtocolServicesExt`] offers four access styles, focusing on different
+//! can dangle later. [`ProtocolServicesExt`] offers five access styles, focusing on different
 //! use cases:
 //!
 //! - [`with_protocol`](ProtocolServicesExt::with_protocol) - Run a closure with the interface.
@@ -22,6 +22,8 @@
 //! - [`with_protocol_on`](ProtocolServicesExt::with_protocol_on) - Like `with_protocol`, but acts
 //!   on a specific handle, obtained with [`locate_first_handle`](ProtocolServicesExt::locate_first_handle)
 //!   or [`locate_handles_for`](ProtocolServicesExt::locate_handles_for).
+//! - [`open_protocol`](ProtocolServicesExt::open_protocol) - A [`ProtocolGuard`] that dereferences
+//!   to the interface for a block scope and records access under an agent handle.
 //! - [`locate_token`](ProtocolServicesExt::locate_token) - A [`ProtocolToken`] that stores
 //!   only a handle and never dangles. Useful for keeping a reference for the rest of boot.
 //!   Re-validate each use with [`resolve`](ProtocolServicesExt::resolve).
