@@ -1059,6 +1059,34 @@ mod tests {
     }
 
     #[test]
+    fn test_nested_tuple_validates_inner_params() {
+        use crate::component::service::Service;
+
+        trait MissingService {}
+
+        let mut storage = Storage::default();
+        let mut mock_metadata = MetaData::new::<i32>();
+        storage.add_config(42u32);
+
+        type Nested = (Config<'static, u32>, (Config<'static, u32>, Service<dyn MissingService>));
+        let state = <Nested as Param>::init_state(&mut storage, &mut mock_metadata).unwrap();
+        assert!(!<Nested as Param>::validate(&state, (&storage).into()));
+        assert!(<Nested as Param>::try_validate(&state, (&storage).into()).is_err());
+
+        // Option<tuple> must resolve to None rather than panicking in get_param.
+        // SAFETY: Test code - Option<P> always validates; get_param re-checks P internally.
+        assert!(
+            unsafe {
+                <Option<(Config<'static, u32>, Service<dyn MissingService>)> as Param>::get_param(
+                    &state.1,
+                    (&storage).into(),
+                )
+            }
+            .is_none()
+        );
+    }
+
+    #[test]
     fn test_get_commands() {
         let mut storage = Storage::default();
         let mut mock_metadata = MetaData::new::<i32>();
