@@ -73,7 +73,9 @@
 //!
 //! While a controller is being stopped, the driver may destroy the children it created. The SDK releases the
 //! driver's usage of a child's protocols when the core asks, so the child can be destroyed from within
-//! [`ControllerDriver::stop`].
+//! [`ControllerDriver::stop`]. A nested request to stop the controller itself is refused with
+//! [`ProtocolError::AccessDenied`], as its protocols remain in use until [`ControllerDriver::stop`] or
+//! [`ControllerDriver::stop_children`] returns.
 //!
 //! ## Sharing state between callbacks
 //!
@@ -624,6 +626,12 @@ impl<D: ControllerDriver> Inner<D> {
     /// Releases everything `entry` holds on `handle`, stopping the entry if needed.
     fn release_handle(&self, entry: &Rc<Entry<D>>, handle: Handle) -> Result<(), ProtocolError> {
         if entry.stopping.get() || entry.stopping_children.get() {
+            if handle == entry.controller {
+                // A nested Stop() of the controller itself, for example a consumer of a protocol uninstalled by
+                // stop() disconnecting the controller. Its protocols are in use until the outer call returns, and
+                // that call may still fail and keep managing the controller.
+                return Err(ProtocolError::AccessDenied);
+            }
             // The driver's own stop() or stop_children() is destroying a handle it opened a protocol on.
             self.close_usages_on(entry, handle);
             return Ok(());
@@ -876,8 +884,12 @@ mod tests {
         release_dependencies: bool,
         fail_start: bool,
         fail_stop: bool,
+        fail_stop_after_nested: bool,
         destroy_child_on_stop: Cell<Option<&'static Inner<TestDriver>>>,
         nested_stop_result: Cell<Option<Result<(), ProtocolError>>>,
+        nested_stop_handle: Option<usize>,
+        closed_in_nested_stop: Cell<Option<usize>>,
+        closed_log: Option<Closed>,
         state_access_in_stop: Cell<Option<Result<(), ControllerError>>>,
         supported_seen: Cell<Option<(Handle, Option<bool>)>>,
         start_seen: Cell<Option<(Handle, Option<bool>)>>,
@@ -915,7 +927,14 @@ mod tests {
                 let access = ControllerDriverRef { inner }.with_state(context.controller(), |_| ());
                 self.state_access_in_stop.set(Some(access));
                 // Simulates the core calling Stop() for the child while this driver destroys it.
-                self.nested_stop_result.set(Some(ManagedDriver(inner).stop(h(AGENT), h(CHILD), &[])));
+                let nested = h(self.nested_stop_handle.unwrap_or(CHILD));
+                self.nested_stop_result.set(Some(ManagedDriver(inner).stop(h(AGENT), nested, &[])));
+                if let Some(closed) = &self.closed_log {
+                    self.closed_in_nested_stop.set(Some(closed.lock().unwrap().len()));
+                }
+            }
+            if self.fail_stop_after_nested {
+                return Err(ProtocolError::DeviceError);
             }
             Ok(())
         }
@@ -1173,6 +1192,42 @@ mod tests {
     }
 
     #[test]
+    fn test_controller_driver_nested_stop_of_controller_while_stopping_is_refused() {
+        let closed = Closed::default();
+        let driver = TestDriver {
+            nested_stop_handle: Some(CONTROLLER),
+            closed_log: Some(Arc::clone(&closed)),
+            ..Default::default()
+        };
+        let (binding, driver) = setup(driver, &closed);
+        binding.0.driver.destroy_child_on_stop.set(Some(binding.0));
+        binding.start(h(AGENT), h(CONTROLLER), None).unwrap();
+
+        assert_eq!(binding.stop(h(AGENT), h(CONTROLLER), &[]), Ok(()));
+        assert_eq!(binding.0.driver.nested_stop_result.get(), Some(Err(ProtocolError::AccessDenied)));
+        // Nothing was closed by the nested Stop(); the controller is released once stop() returns.
+        assert_eq!(binding.0.driver.closed_in_nested_stop.get(), Some(0));
+        assert!(!driver.is_managing(h(CONTROLLER)));
+        assert_eq!(*closed.lock().unwrap(), vec![(CONTROLLER, Some(CONTROLLER))]);
+    }
+
+    #[test]
+    fn test_controller_driver_failed_stop_after_nested_stop_of_controller_keeps_it_managed() {
+        let closed = Closed::default();
+        let driver =
+            TestDriver { nested_stop_handle: Some(CONTROLLER), fail_stop_after_nested: true, ..Default::default() };
+        let (binding, driver) = setup(driver, &closed);
+        binding.0.driver.destroy_child_on_stop.set(Some(binding.0));
+        binding.start(h(AGENT), h(CONTROLLER), None).unwrap();
+
+        assert_eq!(binding.stop(h(AGENT), h(CONTROLLER), &[]), Err(ProtocolError::DeviceError));
+        assert_eq!(binding.0.driver.nested_stop_result.get(), Some(Err(ProtocolError::AccessDenied)));
+        assert!(driver.is_managing(h(CONTROLLER)));
+        assert_eq!(driver.with_state(h(CONTROLLER), |state| *state), Ok(7));
+        assert!(closed.lock().unwrap().is_empty());
+    }
+
+    #[test]
     fn test_controller_driver_error_conversions() {
         assert_eq!(ProtocolError::from(ControllerError::NotManaged), ProtocolError::NotFound);
         assert_eq!(ProtocolError::from(ControllerError::Busy), ProtocolError::AccessDenied);
@@ -1234,6 +1289,8 @@ mod tests {
         fail_restart: bool,
         seen_managed: RefCell<Vec<bool>>,
         stopped_children: RefCell<Vec<Handle>>,
+        stop_controller_in_stop_children: Cell<Option<&'static Inner<BusDriver>>>,
+        nested_stop_result: Cell<Option<Result<(), ProtocolError>>>,
     }
 
     impl ControllerDriver for BusDriver {
@@ -1269,6 +1326,9 @@ mod tests {
             assert_eq!(context.controller(), h(CONTROLLER));
             assert_eq!(context.protocol().value, 7);
             self.stopped_children.borrow_mut().extend_from_slice(children);
+            if let Some(inner) = self.stop_controller_in_stop_children.get() {
+                self.nested_stop_result.set(Some(ManagedDriver(inner).stop(h(AGENT), h(CONTROLLER), &[])));
+            }
             Ok(())
         }
     }
@@ -1321,6 +1381,19 @@ mod tests {
             *closed.lock().unwrap(),
             vec![(CONTROLLER, Some(CHILD)), (CONTROLLER, Some(CHILD2)), (CONTROLLER, Some(CONTROLLER))]
         );
+    }
+
+    #[test]
+    fn test_controller_driver_nested_stop_of_controller_while_stopping_children_is_refused() {
+        let closed = Closed::default();
+        let (binding, driver) = setup_with(BusDriver::default(), mock_core_services(&closed));
+        binding.0.driver.stop_controller_in_stop_children.set(Some(binding.0));
+        binding.start(h(AGENT), h(CONTROLLER), None).unwrap();
+
+        assert_eq!(binding.stop(h(AGENT), h(CONTROLLER), &[h(CHILD)]), Ok(()));
+        assert_eq!(binding.0.driver.nested_stop_result.get(), Some(Err(ProtocolError::AccessDenied)));
+        assert!(driver.is_managing(h(CONTROLLER)));
+        assert_eq!(*closed.lock().unwrap(), vec![(CONTROLLER, Some(CHILD))]);
     }
 
     #[test]
