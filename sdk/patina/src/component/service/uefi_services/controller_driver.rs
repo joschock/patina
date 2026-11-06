@@ -347,7 +347,8 @@ impl<'a, D: ControllerDriver> StopContext<'a, D> {
 pub enum ControllerError {
     /// The driver is not managing the controller, or the controller is being stopped.
     NotManaged,
-    /// The controller's state is already in use further up the call stack.
+    /// The controller's state is already in use further up the call stack, or the driver's list of controllers is
+    /// being updated by a `Start()` or `Stop()` that this call interrupted.
     Busy,
 }
 
@@ -413,9 +414,10 @@ impl<D: ControllerDriver> ControllerDriverRef<D> {
     /// # Errors
     ///
     /// Returns [`ControllerError::NotManaged`] if the driver is not managing `controller`, or
-    /// [`ControllerError::Busy`] if its state is already in use further up the call stack.
+    /// [`ControllerError::Busy`] if its state is already in use further up the call stack or this call interrupted
+    /// an update of the driver's controller list.
     pub fn with_state<R>(&self, controller: Handle, f: impl FnOnce(&mut D::State) -> R) -> Result<R, ControllerError> {
-        let entry = self.inner.managed_entry(controller).ok_or(ControllerError::NotManaged)?;
+        let entry = self.inner.state_entry(controller)?;
         let mut state = entry.state.try_borrow_mut().map_err(|_| ControllerError::Busy)?;
         Ok(f(&mut state))
     }
@@ -430,7 +432,7 @@ impl<D: ControllerDriver> ControllerDriverRef<D> {
         controller: Handle,
         f: impl FnOnce(&mut D::State, &D::Protocol) -> R,
     ) -> Result<R, ControllerError> {
-        let entry = self.inner.managed_entry(controller).ok_or(ControllerError::NotManaged)?;
+        let entry = self.inner.state_entry(controller)?;
         let mut state = entry.state.try_borrow_mut().map_err(|_| ControllerError::Busy)?;
         let ptr = self
             .inner
@@ -452,13 +454,13 @@ impl<D: ControllerDriver> ControllerDriverRef<D> {
     ///
     /// Returns [`ControllerError::NotManaged`] if the driver is not managing `controller`, or
     /// [`ControllerError::Busy`] if the state is mutably borrowed further up the call stack, for example by
-    /// [`Self::with_state`].
+    /// [`Self::with_state`], or this call interrupted an update of the driver's controller list.
     pub fn with_shared_state<R>(
         &self,
         controller: Handle,
         f: impl FnOnce(&D::State) -> R,
     ) -> Result<R, ControllerError> {
-        let entry = self.inner.managed_entry(controller).ok_or(ControllerError::NotManaged)?;
+        let entry = self.inner.state_entry(controller)?;
         let state = entry.state.try_borrow().map_err(|_| ControllerError::Busy)?;
         Ok(f(&state))
     }
@@ -473,7 +475,7 @@ impl<D: ControllerDriver> ControllerDriverRef<D> {
         controller: Handle,
         f: impl FnOnce(&D::State, &D::Protocol) -> R,
     ) -> Result<R, ControllerError> {
-        let entry = self.inner.managed_entry(controller).ok_or(ControllerError::NotManaged)?;
+        let entry = self.inner.state_entry(controller)?;
         let state = entry.state.try_borrow().map_err(|_| ControllerError::Busy)?;
         let ptr = self
             .inner
@@ -611,6 +613,19 @@ struct Inner<D: ControllerDriver> {
 impl<D: ControllerDriver> Inner<D> {
     fn managed_entry(&self, controller: Handle) -> Option<Rc<Entry<D>>> {
         self.controllers.borrow().iter().find(|entry| entry.controller == controller && !entry.stopping.get()).cloned()
+    }
+
+    /// Finds `controller`'s entry for a state access.
+    ///
+    /// State accesses can come from event notify functions, which can interrupt `Start()` or `Stop()` while it
+    /// updates the controller list. Such an access fails with [`ControllerError::Busy`] instead of panicking.
+    fn state_entry(&self, controller: Handle) -> Result<Rc<Entry<D>>, ControllerError> {
+        let controllers = self.controllers.try_borrow().map_err(|_| ControllerError::Busy)?;
+        controllers
+            .iter()
+            .find(|entry| entry.controller == controller && !entry.stopping.get())
+            .cloned()
+            .ok_or(ControllerError::NotManaged)
     }
 
     /// Finds every entry holding a protocol on `handle`, either as its controller or through `open_by_driver`.
@@ -1010,6 +1025,26 @@ mod tests {
         binding.start(h(AGENT), h(CONTROLLER), None).unwrap();
         let nested = driver.with_state(h(CONTROLLER), |_| driver.with_state(h(CONTROLLER), |_| ())).unwrap();
         assert_eq!(nested, Err(ControllerError::Busy));
+    }
+
+    #[test]
+    fn test_controller_driver_state_access_during_controller_list_update_reports_busy() {
+        let closed = Closed::default();
+        let (binding, driver) = setup(TestDriver::default(), &closed);
+        binding.start(h(AGENT), h(CONTROLLER), None).unwrap();
+
+        // An event notify function can interrupt Start() or Stop() while it updates the controller list.
+        let update = driver.inner.controllers.borrow_mut();
+        let state_ref = driver.state_ref(h(CONTROLLER));
+        assert_eq!(driver.with_state(h(CONTROLLER), |_| ()), Err(ControllerError::Busy));
+        assert_eq!(driver.with_controller(h(CONTROLLER), |_, _| ()), Err(ControllerError::Busy));
+        assert_eq!(driver.with_shared_state(h(CONTROLLER), |_| ()), Err(ControllerError::Busy));
+        assert_eq!(driver.with_shared_controller(h(CONTROLLER), |_, _| ()), Err(ControllerError::Busy));
+        assert_eq!(state_ref.with(|_| ()), Err(ControllerError::Busy));
+        assert_eq!(state_ref.with_shared(|_| ()), Err(ControllerError::Busy));
+        drop(update);
+
+        assert_eq!(driver.with_shared_state(h(CONTROLLER), |state| *state), Ok(7));
     }
 
     #[test]
