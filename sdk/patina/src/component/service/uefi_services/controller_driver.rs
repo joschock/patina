@@ -219,6 +219,7 @@ pub enum DependencyAction {
 
 /// Information passed to [`ControllerDriver::supported`].
 pub struct SupportedContext<'a, D: ControllerDriver> {
+    agent: Handle,
     controller: Handle,
     protocol: &'a D::Protocol,
     remaining_device_path: Option<BorrowedDevicePathWalker<'a>>,
@@ -226,6 +227,11 @@ pub struct SupportedContext<'a, D: ControllerDriver> {
 }
 
 impl<'a, D: ControllerDriver> SupportedContext<'a, D> {
+    /// The driver's agent handle, for opening or closing protocols that the context does not track.
+    pub fn agent(&self) -> Handle {
+        self.agent
+    }
+
     /// The controller being checked.
     pub fn controller(&self) -> Handle {
         self.controller
@@ -258,6 +264,11 @@ pub struct StartContext<'a, D: ControllerDriver> {
 }
 
 impl<'a, D: ControllerDriver> StartContext<'a, D> {
+    /// The driver's agent handle, for opening or closing protocols that the context does not track.
+    pub fn agent(&self) -> Handle {
+        self.inner.agent
+    }
+
     /// The controller being started.
     pub fn controller(&self) -> Handle {
         self.controller
@@ -326,11 +337,17 @@ impl<'a, D: ControllerDriver> StartContext<'a, D> {
 /// A [`ControllerStateRef`] or [`ControllerDriverRef`] cannot access the controller while it is being stopped, but
 /// the protocol interface is provided through this context.
 pub struct StopContext<'a, D: ControllerDriver> {
+    agent: Handle,
     controller: Handle,
     protocol: &'a D::Protocol,
 }
 
 impl<'a, D: ControllerDriver> StopContext<'a, D> {
+    /// The driver's agent handle, for opening or closing protocols that the context does not track.
+    pub fn agent(&self) -> Handle {
+        self.agent
+    }
+
     /// The controller being stopped.
     pub fn controller(&self) -> Handle {
         self.controller
@@ -595,11 +612,11 @@ struct Entry<D: ControllerDriver> {
 
 impl<D: ControllerDriver> Entry<D> {
     /// Must only be called before the controller's `BY_DRIVER` usage is closed.
-    fn stop_context(&self) -> StopContext<'_, D> {
+    fn stop_context(&self, agent: Handle) -> StopContext<'_, D> {
         // SAFETY: `protocol` is the interface installed for `D::Protocol`'s GUID. The `BY_DRIVER` usage keeps it
         // installed, and it is only closed after `stop` and `stop_children` return.
         let protocol = unsafe { &*self.protocol.as_raw().cast::<D::Protocol>() };
-        StopContext { controller: self.controller, protocol }
+        StopContext { agent, controller: self.controller, protocol }
     }
 }
 
@@ -662,7 +679,7 @@ impl<D: ControllerDriver> Inner<D> {
         }
 
         entry.stopping.set(true);
-        let result = self.driver.stop(&entry.stop_context(), &mut state);
+        let result = self.driver.stop(&entry.stop_context(self.agent), &mut state);
         drop(state);
         if let Err(err) = result {
             entry.stopping.set(false);
@@ -679,7 +696,7 @@ impl<D: ControllerDriver> Inner<D> {
     fn stop_children(&self, entry: &Entry<D>, children: &[Handle]) -> Result<(), ProtocolError> {
         let mut state = entry.state.try_borrow_mut().map_err(|_| ProtocolError::AccessDenied)?;
         entry.stopping_children.set(true);
-        let result = self.driver.stop_children(&entry.stop_context(), children, &mut state);
+        let result = self.driver.stop_children(&entry.stop_context(self.agent), children, &mut state);
         entry.stopping_children.set(false);
         drop(state);
         result?;
@@ -759,7 +776,8 @@ impl<D: ControllerDriver> DriverBinding for ManagedDriver<D> {
         if managed && !(D::RESTARTABLE && inner.managed_entry(controller).is_some()) {
             return Err(ProtocolError::AlreadyStarted);
         }
-        let context = SupportedContext { controller, protocol: &*protocol, remaining_device_path, managed };
+        let context =
+            SupportedContext { agent: inner.agent, controller, protocol: &*protocol, remaining_device_path, managed };
         inner.driver.supported(&context)
     }
 
@@ -915,12 +933,14 @@ mod tests {
         type State = u32;
 
         fn supported(&self, context: &SupportedContext<'_, Self>) -> Result<(), ProtocolError> {
+            assert_eq!(context.agent(), h(AGENT));
             let end_only = context.remaining_device_path().map(|path| path.is_end_only());
             self.supported_seen.set(Some((context.controller(), end_only)));
             if context.protocol().value == 7 { Ok(()) } else { Err(ProtocolError::Unsupported) }
         }
 
         fn start(&self, context: &StartContext<'_, Self>) -> Result<u32, ProtocolError> {
+            assert_eq!(context.agent(), h(AGENT));
             let end_only = context.remaining_device_path().map(|path| path.is_end_only());
             self.start_seen.set(Some((context.controller(), end_only)));
             assert_eq!(context.state_ref().controller(), context.controller());
@@ -934,6 +954,7 @@ mod tests {
         }
 
         fn stop(&self, context: &StopContext<'_, Self>, _state: &mut u32) -> Result<(), ProtocolError> {
+            assert_eq!(context.agent(), h(AGENT));
             assert_eq!(context.protocol().value, 7);
             if self.fail_stop {
                 return Err(ProtocolError::AccessDenied);
